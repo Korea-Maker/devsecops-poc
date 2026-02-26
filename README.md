@@ -1,119 +1,113 @@
 # devsecops-poc
 
-스타트업 개발팀을 위한 DevSecOps 플랫폼 PoC (Proof of Concept)
+스타트업(초기 1~5명 팀)을 위한 **DevSecOps 플랫폼 PoC**.
+
+## 프로젝트 요약
+
+이 프로젝트는 보안 전담 인력이 없는 작은 개발팀이, 복잡한 설정 없이 보안 스캔을 CI 흐름에 붙일 수 있도록 만드는 PoC다.
+
+- 핵심 가치: **가격(저비용) + 간편함(빠른 온보딩)**
+- MVP 방향: **스캔 + 대시보드 + CI 연동**
+- 초기 보안 범위: **SAST + SCA + Secret 탐지**
 
 ---
 
-## 프로젝트 개요
+## Phase 1 고정 결정 (요약)
 
-소규모 스타트업 개발팀이 보안을 개발 파이프라인에 자연스럽게 통합할 수 있도록 돕는 DevSecOps 플랫폼.
+| 항목 | 결정 |
+|---|---|
+| 보안 범위 | SAST + SCA + Secret |
+| 우선 가치 | 가격 + 간편함 |
+| MVP 기능 | 스캔 + 대시보드 + CI 연동 |
+| Backend | TypeScript + Fastify |
+| Frontend | Next.js (App Router) |
+| Database | PostgreSQL |
+| CI 연동 | GitHub App |
+| 초기 언어 지원 | JS/TS + Python |
+| 타겟 팀 크기 | 1~5명 |
+| 인증 | Google SSO |
 
-기존 보안 도구들은 대기업 중심으로 설계되어 있어 스타트업이 도입하기에 복잡하고 비용이 크다. 이 프로젝트는 작은 팀도 쉽게 사용할 수 있는 통합 보안 스캐닝 및 모니터링 환경을 제공하는 것을 목표로 한다.
-
----
-
-## 핵심 가치 제안
-
-스타트업 개발팀이 겪는 보안 Pain Points:
-
-- **복잡성**: SAST, DAST, SCA, Secret 탐지 등 도구가 파편화되어 있어 통합 운영이 어렵다.
-- **비용**: 엔터프라이즈급 보안 솔루션은 스타트업 예산에 맞지 않는다.
-- **인력**: 전담 보안 엔지니어 없이 개발자가 보안까지 챙겨야 하는 현실.
-- **가시성**: 보안 이슈가 어디서 발생했는지 한눈에 보기 어렵다.
-
-이 플랫폼은 무료 PoC로 시작해 팀이 가치를 직접 확인한 후 유료 전환하는 모델을 따른다.
-
----
-
-## 주요 기능 (계획)
-
-- [ ] **보안 스캐닝 파이프라인** - SAST / SCA / Secret 탐지 자동화
-- [ ] **통합 대시보드** - 취약점 현황 및 추이 시각화
-- [ ] **리포팅** - 팀/경영진용 보안 리포트 자동 생성
-- [ ] **CI/CD 연동** - GitHub Actions, GitLab CI 등과 통합
-- [ ] **멀티 테넌시** - SaaS 운영을 위한 조직 단위 격리
-- [ ] **온프레미스 옵션** - 보안 요구사항이 높은 고객을 위한 자체 설치 지원
-- [ ] **알림** - Slack, 이메일 등 채널 연동
+상세 근거/리스크는 `docs/workflow/DECISIONS.md` 참고.
 
 ---
 
 ## 기술 스택
 
-> 기술 스택은 아직 확정되지 않았습니다. 각 항목은 `docs/workflow/QUESTIONS_FOR_JONGWOOK.md`의 답변을 바탕으로 결정됩니다.
+| 영역 | 선택 | 비고 |
+|---|---|---|
+| Frontend | Next.js 15 + TypeScript | App Router 기반 |
+| Backend | Fastify + TypeScript | PoC 속도/생산성 우선 |
+| Database | PostgreSQL | docker-compose로 로컬 실행 |
+| 패키지 매니저 | pnpm workspace | 모노레포 운영 |
+| 테스트 | Vitest + Supertest | API 헬스체크 검증 |
+| 인증(예정) | Google SSO | Phase 2+ 상세 구현 |
+| CI 연동(예정) | GitHub App | GitHub 중심 팀 우선 |
 
-| 영역 | 선택 |
-|------|------|
-| Frontend | [결정 필요] |
-| Backend | [결정 필요] |
-| Database | [결정 필요] |
-| 인프라 / 배포 | [결정 필요] |
-| 스캐닝 엔진 | [결정 필요] |
-| 인증 | [결정 필요] |
+> 성능 이슈가 발생하면 스캔 워커를 Go로 분리하는 옵션을 유지한다.
+
+---
+
+## 현재 구현 상태 (Phase 1)
+
+### API (`apps/api`)
+
+- `GET /health` → `{ ok: true, service: "api" }`
+- `POST /api/v1/scans` → `501` stub (`TODO` 포함)
+
+### Web (`apps/web`)
+
+- Next.js App Router 최소 화면
+- 프로젝트 요약, 확정 의사결정, API 연결 노트 표시
 
 ---
 
 ## 프로젝트 구조
 
-```
+```bash
 devsecops-poc/
-├── docs/
-│   └── workflow/          # 개발 워크플로우 문서, 의사결정 기록
-├── src/                   # 소스 코드 (기술 스택 확정 후 구조화 예정)
-├── tests/                 # 테스트 코드
-└── README.md
+├── apps/
+│   ├── api/                  # Fastify API (@devsecops/api)
+│   └── web/                  # Next.js Web (@devsecops/web)
+├── docs/workflow/
+│   └── DECISIONS.md          # 고정 의사결정 + 리스크
+├── docker-compose.yml        # local PostgreSQL
+├── pnpm-workspace.yaml
+├── tsconfig.base.json
+└── .env.example
 ```
 
 ---
 
 ## 시작하기
 
-> 개발 환경 설정 방법은 기술 스택 확정 후 여기에 추가됩니다.
+```bash
+pnpm install
+cp .env.example .env
+docker compose up -d
+
+# API
+pnpm --filter @devsecops/api dev
+
+# Web
+pnpm --filter @devsecops/web dev
+```
+
+기본 포트:
+- Web: `http://localhost:3000`
+- API: `http://localhost:3001`
+
+---
+
+## 검증 명령
 
 ```bash
-# 예시 - 실제 명령어는 추후 업데이트
-git clone <repo-url>
-cd devsecops-poc
-# TODO: 의존성 설치 및 환경 변수 설정
+pnpm --filter @devsecops/api test
+pnpm --filter @devsecops/api typecheck
 ```
 
 ---
 
-## 개발 워크플로우
+## 문서
 
-`docs/workflow/` 디렉터리에 개발 프로세스, 의사결정 기록, 질문 목록 등이 정리되어 있다.
-
-솔로 개발자 + Claude Code 중심 워크플로우로 운영되며, 주요 결정 사항은 해당 디렉터리에 문서화한다.
-
----
-
-## 로드맵
-
-| Phase | 내용 |
-|-------|------|
-| Phase 0 | 고객 발견 및 요구사항 검증 - 타겟 스타트업 인터뷰, Pain Point 확인 |
-| Phase 1 | 기술 스택 확정 및 개발 환경 구성 |
-| Phase 2 | 핵심 스캐닝 파이프라인 MVP 구현 |
-| Phase 3 | 대시보드 및 리포팅 기능 구현 |
-| Phase 4 | CI/CD 연동 (GitHub Actions 우선) |
-| Phase 5 | 멀티 테넌시 및 SaaS 인프라 구성 |
-| Phase 6 | 베타 고객 온보딩 및 피드백 루프 |
-| Phase 7 | 온프레미스 배포 옵션 개발 |
-| Phase 8 | 유료 전환 모델 및 결제 연동 |
-| Phase 9 | GTM 본격화 - 인바운드/아웃바운드 세일즈 |
-
----
-
-## 다음 단계 (Next Steps)
-
-즉시 실행할 항목:
-
-1. `docs/workflow/QUESTIONS_FOR_JONGWOOK.md`의 질문에 답변 작성
-2. 기술 스택 결정 (위 표 채우기)
-3. 개발 환경 설정 및 초기 repo 구조 확정
-4. Phase 0 고객 발견 활동 시작
-
----
-
-## 라이선스
-
-TBD
+- `docs/workflow/DECISIONS.md`: 확정 의사결정 / 미결정 / 리스크
+- `CLAUDE.md`: 프로젝트 작업 규칙 및 검증 루틴
