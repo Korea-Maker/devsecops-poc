@@ -206,6 +206,30 @@ const scans: Map<string, ScanResultSummary> = new Map();
 
 ---
 
+## Phase 2-2 완료 항목
+
+> 업데이트: 2026-02-27
+> 목적: Phase 2-2에서 scans API를 실무 수준으로 강화한 내용을 기록한다.
+
+### 완료 체크리스트
+
+- [x] API 요청 검증 강화: POST /api/v1/scans에 engine/repoUrl/branch 검증 추가, 400 에러 응답
+- [x] 조회 API 확장: GET /api/v1/scans 목록 조회 + status 쿼리 필터 지원
+- [x] 도메인 분리: scanStore를 scanner/store.ts로 추출, scans.ts는 라우팅 중심으로 단순화
+- [x] 테스트 보강: invalid engine/repoUrl 400 검증, 목록 조회, status 필터 등 테스트 케이스 추가
+- [x] 코드 품질: 한국어 주석, 타입 안전성, 외부 스캐너 미구현(TODO 유지)
+
+### 변경 파일
+
+| 파일 | 변경 내용 |
+|------|----------|
+| `apps/api/src/scanner/store.ts` | 신규 - scanStore 도메인 로직 분리 |
+| `apps/api/src/routes/scans.ts` | 수정 - 검증 추가, 목록 조회 엔드포인트, store.ts 사용 |
+| `apps/api/tests/scans.test.ts` | 수정 - 테스트 케이스 추가 |
+| `docs/workflow/PHASE2_BACKLOG.md` | 수정 - Phase 2-2 완료 항목 섹션 추가 |
+
+---
+
 ## 참고 문서
 
 - `DECISIONS.md` — Phase 1 확정 의사결정
