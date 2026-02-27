@@ -1,4 +1,6 @@
+import { getScanExecutionMode } from "./adapters/common.js";
 import { getAdapter } from "./registry.js";
+import { prepareScanSource } from "./source-prep.js";
 import { getScan, updateScanMeta, updateScanStatus } from "./store.js";
 import type { ScanRecord } from "./store.js";
 import type { ScanRequest } from "./types.js";
@@ -203,6 +205,8 @@ export async function processNextScanJob(): Promise<boolean> {
   }
 
   isProcessing = true;
+  let sourceCleanup: (() => Promise<void>) | null = null;
+
   try {
     const scan = getScan(scanId);
     if (!scan) {
@@ -214,6 +218,14 @@ export async function processNextScanJob(): Promise<boolean> {
     // mock 모드에서도 기존 테스트/동작과 동일하게 짧은 처리 지연을 유지한다.
     await delay(MOCK_SCAN_DURATION_MS);
 
+    const executionMode = getScanExecutionMode();
+    const preparedSource = await prepareScanSource(
+      scan.repoUrl,
+      scan.branch,
+      executionMode
+    );
+    sourceCleanup = preparedSource.cleanup;
+
     if (consumeForcedFailure(scanId)) {
       throw new Error("테스트 강제 실패");
     }
@@ -221,6 +233,7 @@ export async function processNextScanJob(): Promise<boolean> {
     const adapter = getAdapter(scan.engine);
     const result = await adapter.scan({
       ...toScanRequest(scan),
+      repoUrl: preparedSource.repoUrl,
       status: "running",
     });
 
@@ -274,6 +287,14 @@ export async function processNextScanJob(): Promise<boolean> {
     });
     return true;
   } finally {
+    if (sourceCleanup) {
+      try {
+        await sourceCleanup();
+      } catch {
+        // 정리 실패는 스캔 결과 상태를 덮어쓰지 않도록 무시한다.
+      }
+    }
+
     isProcessing = false;
   }
 }

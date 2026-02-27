@@ -1,24 +1,27 @@
 import type { FastifyPluginAsync } from "fastify";
-import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
-import { createScan, getScan, listScans } from "../scanner/store.js";
+import { classifyRepoUrlInput, normalizeRepoUrlInput } from "../scanner/source-prep.js";
 import { enqueueScan, listDeadLetters, redriveDeadLetter } from "../scanner/queue.js";
+import { createScan, getScan, listScans } from "../scanner/store.js";
+import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
 
 /** 유효한 스캔 엔진 목록 */
-const VALID_ENGINES: ScanEngineType[] = ["semgrep", "trivy", "gitleaks"];
+const VALID_ENGINES = ["semgrep", "trivy", "gitleaks"] as const;
+const VALID_ENGINE_SET: ReadonlySet<string> = new Set(VALID_ENGINES);
 
 /** 유효한 스캔 상태 목록 */
-const VALID_STATUSES: ScanStatus[] = ["queued", "running", "completed", "failed"];
+const VALID_STATUSES = ["queued", "running", "completed", "failed"] as const;
+const VALID_STATUS_SET: ReadonlySet<string> = new Set(VALID_STATUSES);
 
-/**
- * URL 형식 문자열인지 검증합니다.
- */
-function isValidUrl(value: string): boolean {
-  try {
-    new URL(value);
-    return true;
-  } catch {
-    return false;
-  }
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isScanEngineType(value: unknown): value is ScanEngineType {
+  return typeof value === "string" && VALID_ENGINE_SET.has(value);
+}
+
+function isScanStatus(value: unknown): value is ScanStatus {
+  return typeof value === "string" && VALID_STATUS_SET.has(value);
 }
 
 export const scanRoutes: FastifyPluginAsync = async (app) => {
@@ -29,23 +32,24 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
     const { engine, repoUrl, branch } = request.body;
 
     // engine 검증: 필수값이며 허용된 엔진 목록 중 하나여야 함
-    if (!engine || !VALID_ENGINES.includes(engine as ScanEngineType)) {
+    if (!isScanEngineType(engine)) {
       return reply.status(400).send({
         error: `engine은 ${VALID_ENGINES.join(", ")} 중 하나여야 합니다`,
       });
     }
 
-    // repoUrl 검증: 필수값이며 유효한 URL 형식이어야 함
-    if (!repoUrl || typeof repoUrl !== "string" || !isValidUrl(repoUrl)) {
+    // repoUrl 검증: source-prep과 동일 계약 사용
+    if (!isNonEmptyString(repoUrl) || (await classifyRepoUrlInput(repoUrl)) === "unsupported") {
       return reply.status(400).send({
-        error: "repoUrl은 유효한 URL 형식이어야 합니다",
+        error:
+          "repoUrl은 로컬 디렉터리 경로 또는 http/https/ssh/file://, git@... 형식이어야 합니다",
       });
     }
 
     const record = createScan({
-      engine: engine as ScanEngineType,
-      repoUrl,
-      branch: typeof branch === "string" && branch.length > 0 ? branch : "main",
+      engine,
+      repoUrl: normalizeRepoUrlInput(repoUrl),
+      branch: isNonEmptyString(branch) ? branch.trim() : "main",
     });
     enqueueScan(record.id);
 
@@ -59,9 +63,7 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
       const { status } = request.query;
 
       // 유효하지 않은 status 값은 무시하고 전체 반환
-      const validStatus = VALID_STATUSES.includes(status as ScanStatus)
-        ? (status as ScanStatus)
-        : undefined;
+      const validStatus = isScanStatus(status) ? status : undefined;
 
       const scans = listScans(validStatus ? { status: validStatus } : undefined);
       return reply.status(200).send(scans);

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import {
@@ -93,6 +96,36 @@ describe("Scans API", () => {
       expect(uuidRegex.test(response.json().scanId)).toBe(true);
     });
 
+    it("git@ 형식 repoUrl이면 202를 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "git@github.com:test/repo.git" },
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toHaveProperty("scanId");
+      expect(response.json().status).toBe("queued");
+    });
+
+    it("로컬 디렉터리 경로 repoUrl이면 202를 반환해야 한다", async () => {
+      const localDir = mkdtempSync(join(tmpdir(), "scan-route-local-"));
+
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/v1/scans",
+          payload: { engine: "trivy", repoUrl: localDir },
+        });
+
+        expect(response.statusCode).toBe(202);
+        expect(response.json()).toHaveProperty("scanId");
+        expect(response.json().status).toBe("queued");
+      } finally {
+        rmSync(localDir, { recursive: true, force: true });
+      }
+    });
+
     it("branch 미지정 시 기본값 'main'이 적용되어야 한다", async () => {
       const createRes = await app.inject({
         method: "POST",
@@ -143,11 +176,33 @@ describe("Scans API", () => {
       expect(response.json()).toHaveProperty("error");
     });
 
+    it("ftp:// 스킴 repoUrl이면 400을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "ftp://example.com/repo.git" },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toHaveProperty("error");
+    });
+
     it("repoUrl이 누락되면 400을 반환해야 한다", async () => {
       const response = await app.inject({
         method: "POST",
         url: "/api/v1/scans",
         payload: { engine: "semgrep" },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toHaveProperty("error");
+    });
+
+    it("repoUrl이 빈 문자열이면 400을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "   " },
       });
 
       expect(response.statusCode).toBe(400);

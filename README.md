@@ -47,12 +47,13 @@
 
 ---
 
-## 현재 구현 상태 (Phase 2-6 기준)
+## 현재 구현 상태 (Phase 2-7 기준)
 
 ### API (`apps/api`)
 
 - `GET /health` → `{ ok: true, service: "api" }`
 - `POST /api/v1/scans` → 스캔 요청 생성 + 큐 적재 (`202 Accepted`)
+  - `repoUrl` 입력 계약: 로컬 디렉터리 경로 또는 `http/https/ssh/file://`, `git@...` 형식 허용 (`ftp://` 등 미지원 스킴/빈 문자열은 거부)
 - `GET /api/v1/scans` → 스캔 목록 조회 (`status` 필터 지원)
 - `GET /api/v1/scans/:id` → 단일 스캔 상태 조회 (완료 시 `findings` 요약 포함)
 - `GET /api/v1/scans/dead-letters` → dead-letter 목록 조회
@@ -62,7 +63,10 @@
 
 - 기본 실행 모드: `SCAN_EXECUTION_MODE=mock` (미설정/비정상 값 포함)
 - `mock` 모드: 엔진별 deterministic 결과 반환
-- `native` 모드: semgrep/trivy/gitleaks CLI 호출 시도(미설치/실패 시 엔진명 포함 에러로 재시도/실패 처리)
+- `native` 모드 소스 준비 정책:
+  - 로컬 경로(`repoUrl`이 실제 디렉터리)면 해당 경로를 그대로 스캔
+  - 원격 저장소 URL(`http/https/ssh/git@/file://`)이면 스캔 전 임시 디렉터리에 `git clone --depth 1 --branch <branch>` 수행
+  - 어댑터에는 clone된 로컬 경로를 전달해 CLI를 실행하고, 처리 성공/실패와 무관하게 임시 clone 정리(cleanup)
 - 실패 처리: retry + exponential backoff + dead-letter 지원
 
 주요 스캔 환경변수:
