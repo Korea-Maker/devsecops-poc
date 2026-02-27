@@ -1,4 +1,7 @@
+import { getAdapter } from "./registry.js";
 import { getScan, updateScanMeta, updateScanStatus } from "./store.js";
+import type { ScanRecord } from "./store.js";
+import type { ScanRequest } from "./types.js";
 
 const DEFAULT_WORKER_INTERVAL_MS = 250;
 const MOCK_SCAN_DURATION_MS = 30;
@@ -29,6 +32,17 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function toScanRequest(scan: ScanRecord): ScanRequest {
+  return {
+    id: scan.id,
+    engine: scan.engine,
+    repoUrl: scan.repoUrl,
+    branch: scan.branch,
+    status: scan.status,
+    createdAt: new Date(scan.createdAt),
+  };
 }
 
 function readEnvIntWithFallback(
@@ -126,6 +140,7 @@ export function redriveDeadLetter(scanId: string): RedriveDeadLetterResult {
   const updatedMeta = updateScanMeta(scanId, {
     retryCount: 0,
     lastError: null,
+    findings: null,
   });
   const updatedStatus = updateScanStatus(scanId, "queued");
 
@@ -196,14 +211,29 @@ export async function processNextScanJob(): Promise<boolean> {
 
     updateScanStatus(scanId, "running");
 
-    // 실제 외부 스캐너 호출 대신 짧은 지연으로 mock 처리
+    // mock 모드에서도 기존 테스트/동작과 동일하게 짧은 처리 지연을 유지한다.
     await delay(MOCK_SCAN_DURATION_MS);
 
     if (consumeForcedFailure(scanId)) {
       throw new Error("테스트 강제 실패");
     }
 
-    updateScanMeta(scanId, { lastError: null });
+    const adapter = getAdapter(scan.engine);
+    const result = await adapter.scan({
+      ...toScanRequest(scan),
+      status: "running",
+    });
+
+    updateScanMeta(scanId, {
+      lastError: null,
+      findings: {
+        totalFindings: result.totalFindings,
+        critical: result.critical,
+        high: result.high,
+        medium: result.medium,
+        low: result.low,
+      },
+    });
     updateScanStatus(scanId, "completed");
     return true;
   } catch (error) {
@@ -224,13 +254,17 @@ export async function processNextScanJob(): Promise<boolean> {
       updateScanMeta(scanId, {
         retryCount: nextRetryCount,
         lastError: errorMessage,
+        findings: null,
       });
       updateScanStatus(scanId, "queued");
       scheduleRetry(scanId, backoffMs);
       return true;
     }
 
-    updateScanMeta(scanId, { lastError: errorMessage });
+    updateScanMeta(scanId, {
+      lastError: errorMessage,
+      findings: null,
+    });
     updateScanStatus(scanId, "failed");
     deadLetterQueue.push({
       scanId,

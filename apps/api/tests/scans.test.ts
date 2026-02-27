@@ -10,6 +10,7 @@ import { clearStore } from "../src/scanner/store.js";
 
 const ORIGINAL_RETRY_BACKOFF_BASE_MS = process.env.SCAN_RETRY_BACKOFF_BASE_MS;
 const ORIGINAL_MAX_RETRIES = process.env.SCAN_MAX_RETRIES;
+const ORIGINAL_SCAN_EXECUTION_MODE = process.env.SCAN_EXECUTION_MODE;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -56,12 +57,14 @@ describe("Scans API", () => {
     clearStore();
     process.env.SCAN_RETRY_BACKOFF_BASE_MS = "100";
     process.env.SCAN_MAX_RETRIES = "2";
+    process.env.SCAN_EXECUTION_MODE = "mock";
     vi.useRealTimers();
   });
 
   afterEach(() => {
     restoreEnv("SCAN_RETRY_BACKOFF_BASE_MS", ORIGINAL_RETRY_BACKOFF_BASE_MS);
     restoreEnv("SCAN_MAX_RETRIES", ORIGINAL_MAX_RETRIES);
+    restoreEnv("SCAN_EXECUTION_MODE", ORIGINAL_SCAN_EXECUTION_MODE);
     vi.useRealTimers();
   });
 
@@ -169,6 +172,36 @@ describe("Scans API", () => {
       expect(getRes.statusCode).toBe(200);
       expect(getRes.json().id).toBe(scanId);
       expect(getRes.json().status).toBe("queued");
+    });
+
+    it("완료된 스캔 조회 시 findings 요약이 포함되어야 한다", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-findings" },
+      });
+
+      const { scanId } = createRes.json();
+
+      vi.useFakeTimers();
+      const jobPromise = processNextScanJob();
+      await vi.advanceTimersByTimeAsync(40);
+      await jobPromise;
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+      });
+
+      expect(getRes.statusCode).toBe(200);
+      expect(getRes.json().status).toBe("completed");
+      expect(getRes.json().findings).toBeDefined();
+      expect(getRes.json().findings.totalFindings).toBe(
+        getRes.json().findings.critical +
+          getRes.json().findings.high +
+          getRes.json().findings.medium +
+          getRes.json().findings.low
+      );
     });
 
     it("존재하지 않는 스캔을 조회하면 404를 반환해야 한다", async () => {

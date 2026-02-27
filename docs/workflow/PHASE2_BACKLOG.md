@@ -3,6 +3,10 @@
 > 업데이트: 2026-02-27
 > 목적: Phase 2 Week 1 (이번 주)에 구현할 5개 핵심 목표와 검증 기준을 명시한다.
 > 대상: scanner 도메인 공통 타입 → 어댑터 구현 → API 라우트 통합
+>
+> 문서 표기 규칙:
+> - **현재 계약(Current Contract)**: 지금 코드베이스에서 실제로 동작/유지하는 기준
+> - **초기 계획(역사)**: Week 1 당시 목표/예시로, 현재 구현과 다를 수 있는 기록
 
 ---
 
@@ -11,8 +15,8 @@
 | # | 목표 | 소유 파일 | 예상 시간 | 의존성 |
 |---|------|---------|---------|--------|
 | 1 | 스캔 도메인 공통 타입 정의 | `apps/api/src/scanner/types.ts` | 1-2h | 없음 |
-| 2 | SAST/SCA/Secret 어댑터 스텁 | `apps/api/src/scanner/adapters/{semgrep,trivy,gitleaks}.ts` | 2-3h | #1 |
-| 3 | 어댑터 Registry 구현 | `apps/api/src/scanner/registry.ts` | 1-2h | #1 |
+| 2 | SAST/SCA/Secret 어댑터 구현 (현재: mock/native 기본 구현, 역사: 스텁 계획) | `apps/api/src/scanner/adapters/{semgrep,trivy,gitleaks}.ts` | 2-3h | #1 |
+| 3 | 어댑터 Registry 구현 (현재: `getAdapter`/`listEngines`) | `apps/api/src/scanner/registry.ts` | 1-2h | #1 |
 | 4 | POST /api/v1/scans → 202 응답 | `apps/api/src/routes/scans.ts` | 1-2h | #1, #3 |
 | 5 | GET /api/v1/scans/:id 상태 조회 | `apps/api/src/routes/scans.ts` | 1-2h | #4 |
 
@@ -38,65 +42,80 @@
 
 ---
 
-## 목표 2: SAST/SCA/Secret 어댑터 스텁 구현
+## 목표 2: SAST/SCA/Secret 어댑터 구현
 
-### 설명
-`scanner/adapters/` 디렉토리에 3개 어댑터를 구현한다. 각 어댑터는 `ScanAdapter` 인터페이스를 구현하며, 실제 스캔 로직은 TODO로 남겨둔다.
+### 현재 계약 (Current Contract, Phase 2-6 기준)
+`scanner/adapters/`의 3개 어댑터는 모두 `ScanAdapter`를 구현하며, 아래 동작을 제공한다.
 
-#### semgrep.ts
+- `SCAN_EXECUTION_MODE=mock`: 입력 기반 deterministic 결과 반환
+- `SCAN_EXECUTION_MODE=native`: semgrep/trivy/gitleaks CLI 실행 + JSON 파싱 + findings 집계
+- native 실패 시 엔진명 포함 에러 메시지 계약 유지
+  - 실행 실패: `[engine] native 실행 실패: ...`
+  - 결과 형식 실패: `[engine] native 결과 형식 오류: ...`
+
+### 초기 계획(역사)
+Week 1 초기 계획에서는 아래처럼 TODO 스텁만 우선 배치하는 목표였다.
+
+#### semgrep.ts (역사 예시)
 ```typescript
 // ScanAdapter 구현
 // scan(): TODO - semgrep CLI 호출 로직
 // parseResults(): TODO - SARIF 또는 JSON 파싱
 ```
 
-#### trivy.ts
+#### trivy.ts (역사 예시)
 ```typescript
 // ScanAdapter 구현
 // scan(): TODO - trivy CLI 호출 로직
 // parseResults(): TODO - JSON 파싱
 ```
 
-#### gitleaks.ts
+#### gitleaks.ts (역사 예시)
 ```typescript
 // ScanAdapter 구현
 // scan(): TODO - gitleaks CLI 호출 로직
 // parseResults(): TODO - JSON 파싱
 ```
 
-### 검증 기준
+> 위 스텁 중심 설명은 "초기 계획" 기록이며, 현재 코드는 이미 실행 경로(mock/native)를 포함한다.
+
+### 검증 기준 (현재 계약)
 
 | 기준 | 체크 항목 |
 |-----|---------|
-| 파일 생성 | 3개 어댑터 모두 생성됨 |
-| 인터페이스 준수 | 각 어댑터가 `ScanAdapter` 인터페이스 구현 (타입체크 통과) |
-| 메서드 스톱 | `scan()`, `parseResults()` 메서드 모두 TODO 스텁 포함 |
+| 파일 구성 | 3개 어댑터 모두 `ScanAdapter` 구현 |
+| 실행 모드 분기 | `mock`/`native` 분기 동작 (`SCAN_EXECUTION_MODE`) |
+| native 에러 계약 | 실행/형식 오류 모두 엔진명 포함 메시지 보장 |
 | 타입 안전 | `pnpm --filter @devsecops/api typecheck` 0 errors |
 
 ---
 
 ## 목표 3: 어댑터 Registry 구현
 
-### 설명
-`scanner/registry.ts`에서 엔진별 어댑터를 등록하고 조회하는 registry를 구현한다.
+### 현재 계약 (Current Contract, Phase 2-6 기준)
+`scanner/registry.ts`는 엔진별 어댑터 등록/조회에 대해 아래 두 함수를 제공한다.
 
-#### 핵심 함수
 - **`getAdapter(engineType: ScanEngineType): ScanAdapter`**
-  엔진 타입에 따라 해당 어댑터 인스턴스 반환
+  엔진 타입에 따라 해당 어댑터 인스턴스를 반환한다.
 
 - **`listEngines(): ScanEngineType[]`**
-  지원되는 모든 엔진 목록 반환
+  등록된 엔진 목록을 반환한다.
 
-- **`isEngineSupported(engineType: string): boolean`**
-  엔진 지원 여부 확인
+### 초기 계획(역사)
+초기 계획에는 `isEngineSupported(engineType: string): boolean`을 별도 export하는 요구가 있었다.
 
-### 검증 기준
+- 현재 구현에는 `isEngineSupported()`가 **없다**.
+- 현재 코드 기준에서는 `listEngines().includes(engine as ScanEngineType)`로 대체 가능하다.
+- `isEngineSupported()`를 별도 함수로 둘지는 후속 리팩터링 TODO로 관리한다.
+
+### 검증 기준 (현재 계약)
 
 | 기준 | 체크 항목 |
 |-----|---------|
-| Registry 함수 | `getAdapter()`, `listEngines()`, `isEngineSupported()` export |
+| Registry 함수 | `getAdapter()`, `listEngines()` export |
 | 엔진 매핑 | `'semgrep'` → semgrep, `'trivy'` → trivy, `'gitleaks'` → gitleaks |
 | 타입 안전 | registry 호출 시 정확한 어댑터 타입 반환 |
+| TODO 명확성 | `isEngineSupported()`는 역사적 요구사항이며 현재 미구현임을 문서에 명시 |
 | 커버리지 | `pnpm --filter @devsecops/api typecheck` 0 errors |
 
 ---
@@ -197,8 +216,8 @@
 
 ```
 [ ] 목표 1: scanner/types.ts 정의 완료, typecheck 통과
-[ ] 목표 2: 3개 어댑터 파일 생성, ScanAdapter 구현, typecheck 통과
-[ ] 목표 3: registry.ts 구현, getAdapter()/listEngines() export
+[ ] 목표 2: 3개 어댑터 ScanAdapter 구현 + mock/native 실행 경로 확인
+[ ] 목표 3: registry.ts 구현, getAdapter()/listEngines() export (isEngineSupported는 현재 미구현)
 [ ] 목표 4: POST /api/v1/scans 구현, 202 응답, 테스트 1개 통과
 [ ] 목표 5: GET /api/v1/scans/:id 구현, 테스트 3개 통과
 [ ] 전체 typecheck: pnpm --filter @devsecops/api typecheck 0 errors
@@ -324,6 +343,41 @@
 - [ ] 실제 외부 스캐너 실행 파이프라인 연결(semgrep/trivy/gitleaks CLI)
 
 ---
+
+## Phase 2-6 완료 항목
+
+> 업데이트: 2026-02-27
+> 목적: 실제 스캐너 실행 파이프라인 1차(실행 경로 도입 + 기본 안정성 확보) 완료 내역 기록
+
+### 완료 체크리스트
+
+- [x] 어댑터 실행 모드 분기 도입 (`SCAN_EXECUTION_MODE`)
+  - [x] 기본값 `mock` (미설정/비정상 값 fallback)
+  - [x] `native` 모드에서 semgrep/trivy/gitleaks CLI 실행 시도 및 최소 JSON 파싱 구현
+  - [x] native 실패 시 엔진명 + 원인 포함 에러 메시지로 디버깅 가능성 확보
+- [x] 큐 성공 경로를 mock 지연 완료에서 실제 어댑터 호출 기반으로 전환
+  - [x] scan 레코드 → `ScanRequest` 변환 후 엔진별 adapter 실행
+  - [x] 결과 요약(findings 카운트) 저장소 반영
+  - [x] 성공 시 `completed` 전이
+- [x] 저장소/API 응답 확장
+  - [x] `ScanRecord`에 findings 요약 필드 추가
+  - [x] `GET /api/v1/scans/:id`에서 완료 스캔의 findings 확인 가능
+- [x] 테스트 보강
+  - [x] queue 성공 처리 시 findings 저장 검증
+  - [x] mock 모드 어댑터 결과 포맷/결정성 검증 테스트 신규 추가
+  - [x] 기존 dead-letter/redrive 회귀 없음
+- [x] 문서 동기화
+  - [x] 본 문서에 Phase 2-6 완료 섹션 추가
+  - [x] README 현재 구현 상태를 실제 API/큐 동작 기준으로 갱신
+
+### 남은 TODO (Phase 2-7+)
+
+- [ ] native 모드 고도화
+  - [ ] repoUrl 원격 저장소 클론/캐시 전략 정립 (현재는 repoUrl을 CLI target으로 직접 전달)
+  - [ ] 엔진별 파서 정밀도 개선 (Semgrep rule metadata, Trivy 패키지/컴포넌트 정보, Gitleaks rule severity 매핑)
+  - [ ] CLI 버전 차이 대응 및 표준 에러 코드 매핑
+- [ ] 스캔 결과 상세(파일/라인 단위) 저장소 모델 설계 및 API 확장
+- [ ] in-memory 큐를 영속 큐(예: Redis/Broker)로 전환 검토
 
 ## 참고 문서
 

@@ -1,5 +1,10 @@
 import { randomUUID } from "crypto";
-import type { ScanEngineType, ScanStatus } from "./types.js";
+import type { ScanEngineType, ScanResultSummary, ScanStatus } from "./types.js";
+
+export type ScanFindingsSummary = Pick<
+  ScanResultSummary,
+  "totalFindings" | "critical" | "high" | "medium" | "low"
+>;
 
 /** 스캔 레코드 인터페이스 */
 export interface ScanRecord {
@@ -12,6 +17,7 @@ export interface ScanRecord {
   completedAt?: string;
   retryCount: number;
   lastError?: string;
+  findings?: ScanFindingsSummary;
 }
 
 /** 인메모리 스캔 저장소 */
@@ -90,10 +96,14 @@ export function updateScanStatus(id: string, status: ScanStatus): ScanRecord | u
   return next;
 }
 
-/** 스캔 실행 메타데이터(재시도/오류)를 업데이트합니다. */
+/** 스캔 실행 메타데이터(재시도/오류/findings)를 업데이트합니다. */
 export function updateScanMeta(
   id: string,
-  patch: { retryCount?: number; lastError?: string | null }
+  patch: {
+    retryCount?: number;
+    lastError?: string | null;
+    findings?: ScanFindingsSummary | null;
+  }
 ): ScanRecord | undefined {
   const current = scanStore.get(id);
   if (!current) {
@@ -112,6 +122,12 @@ export function updateScanMeta(
     delete next.lastError;
   } else if (patch.lastError !== undefined) {
     next.lastError = patch.lastError;
+  }
+
+  if (patch.findings === null) {
+    delete next.findings;
+  } else if (patch.findings !== undefined) {
+    next.findings = patch.findings;
   }
 
   scanStore.set(id, next);

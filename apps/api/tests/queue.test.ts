@@ -14,6 +14,7 @@ import { clearStore, createScan, getScan } from "../src/scanner/store.js";
 
 const ORIGINAL_RETRY_BACKOFF_BASE_MS = process.env.SCAN_RETRY_BACKOFF_BASE_MS;
 const ORIGINAL_MAX_RETRIES = process.env.SCAN_MAX_RETRIES;
+const ORIGINAL_SCAN_EXECUTION_MODE = process.env.SCAN_EXECUTION_MODE;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -30,12 +31,14 @@ describe("Scan Queue", () => {
     clearStore();
     process.env.SCAN_RETRY_BACKOFF_BASE_MS = "100";
     process.env.SCAN_MAX_RETRIES = "2";
+    process.env.SCAN_EXECUTION_MODE = "mock";
     vi.useRealTimers();
   });
 
   afterEach(() => {
     restoreEnv("SCAN_RETRY_BACKOFF_BASE_MS", ORIGINAL_RETRY_BACKOFF_BASE_MS);
     restoreEnv("SCAN_MAX_RETRIES", ORIGINAL_MAX_RETRIES);
+    restoreEnv("SCAN_EXECUTION_MODE", ORIGINAL_SCAN_EXECUTION_MODE);
     vi.useRealTimers();
   });
 
@@ -68,6 +71,15 @@ describe("Scan Queue", () => {
     expect(getQueueSize()).toBe(0);
     expect(getScan(record.id)?.status).toBe("completed");
     expect(getScan(record.id)?.completedAt).toBeDefined();
+
+    const findings = getScan(record.id)?.findings;
+    expect(findings).toBeDefined();
+    expect(findings?.totalFindings).toBe(
+      (findings?.critical ?? 0) +
+        (findings?.high ?? 0) +
+        (findings?.medium ?? 0) +
+        (findings?.low ?? 0)
+    );
   });
 
   it("1회 실패 후 재시도 성공 시 queued -> running -> queued(retry) -> running -> completed로 전이되어야 한다", async () => {
@@ -105,6 +117,7 @@ describe("Scan Queue", () => {
     expect(getScan(record.id)?.status).toBe("completed");
     expect(getScan(record.id)?.retryCount).toBe(1);
     expect(getScan(record.id)?.lastError).toBeUndefined();
+    expect(getScan(record.id)?.findings).toBeDefined();
     expect(getQueueSize()).toBe(0);
     expect(getDeadLetterSize()).toBe(0);
   });

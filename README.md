@@ -47,12 +47,29 @@
 
 ---
 
-## 현재 구현 상태 (Phase 1)
+## 현재 구현 상태 (Phase 2-6 기준)
 
 ### API (`apps/api`)
 
 - `GET /health` → `{ ok: true, service: "api" }`
-- `POST /api/v1/scans` → `501` stub (`TODO` 포함)
+- `POST /api/v1/scans` → 스캔 요청 생성 + 큐 적재 (`202 Accepted`)
+- `GET /api/v1/scans` → 스캔 목록 조회 (`status` 필터 지원)
+- `GET /api/v1/scans/:id` → 단일 스캔 상태 조회 (완료 시 `findings` 요약 포함)
+- `GET /api/v1/scans/dead-letters` → dead-letter 목록 조회
+- `POST /api/v1/scans/:id/redrive` → dead-letter 재처리 요청
+
+스캔 워커 동작:
+
+- 기본 실행 모드: `SCAN_EXECUTION_MODE=mock` (미설정/비정상 값 포함)
+- `mock` 모드: 엔진별 deterministic 결과 반환
+- `native` 모드: semgrep/trivy/gitleaks CLI 호출 시도(미설치/실패 시 엔진명 포함 에러로 재시도/실패 처리)
+- 실패 처리: retry + exponential backoff + dead-letter 지원
+
+주요 스캔 환경변수:
+
+- `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
+- `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
+- `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
 
 ### Web (`apps/web`)
 
@@ -103,6 +120,7 @@ pnpm --filter @devsecops/web dev
 ```bash
 pnpm --filter @devsecops/api test
 pnpm --filter @devsecops/api typecheck
+pnpm --filter @devsecops/api build
 ```
 
 ---

@@ -95,7 +95,7 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
     }
   );
 
-  /** GET /api/v1/scans/:id — 단일 스캔 조회 */
+  /** GET /api/v1/scans/:id — 단일 스캔 조회 (완료 상태면 findings 요약 포함) */
   app.get<{ Params: { id: string } }>(
     "/api/v1/scans/:id",
     async (request, reply) => {
