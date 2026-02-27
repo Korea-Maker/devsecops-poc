@@ -100,8 +100,15 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 
 ### Web (`apps/web`)
 
-- Next.js App Router 최소 화면
-- 프로젝트 요약, 확정 의사결정, API 연결 노트 표시
+- **대시보드** (`/`) — 스캔 현황 요약, findings 통계, 큐 상태, 스캔 목록 (필터/정렬/검색)
+- **스캔 상세** (`/scans/[id]`) — 메타 정보, 상태별 해결 가이드, findings severity, 오류 정보
+- **리포트** (`/reports/[id]`) — 스캔 리포트 조회, HTML 다운로드, PDF 인쇄 안내
+
+대시보드 기능:
+- 5초 자동 새로고침
+- 상태/엔진 필터, scanId/repoUrl 검색, createdAt 정렬
+- URL querystring 유지 (`?filter=failed&engine=semgrep&sort=asc`)
+- 반응형 디자인 (데스크톱 테이블 / 모바일 카드)
 
 ---
 
@@ -147,12 +154,25 @@ pnpm --filter @devsecops/web dev
 ```bash
 pnpm --filter @devsecops/api test
 pnpm --filter @devsecops/api typecheck
+pnpm --filter @devsecops/web typecheck
 pnpm --filter @devsecops/api build
+pnpm --filter @devsecops/web build
 ```
+
+---
+
+## 현재 제약 사항
+
+- **인메모리 스토어**: API 서버 재시작 시 모든 스캔 데이터 소실 (PostgreSQL 연동 예정)
+- **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
+- **인증 미구현**: Google SSO 미구현 — 대시보드에 누구나 접근 가능
+- **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
+- **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체
 
 ---
 
 ## 문서
 
 - `docs/workflow/DECISIONS.md`: 확정 의사결정 / 미결정 / 리스크
+- `docs/workflow/PHASE3_BACKLOG.md`: Phase 3 대시보드/리포팅 구현 기록
 - `CLAUDE.md`: 프로젝트 작업 규칙 및 검증 루틴

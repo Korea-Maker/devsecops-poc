@@ -1,0 +1,504 @@
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 32px 20px;
+}
+
+.header {
+  margin-bottom: 32px;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* 섹션 */
+.section {
+  margin-bottom: 28px;
+}
+
+.sectionTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scanCount {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* 에러 배너 */
+.errorBanner {
+  padding: 12px 16px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 8px;
+  color: var(--danger);
+  font-size: 0.875rem;
+  margin-bottom: 24px;
+}
+
+/* 통계 카드 그리드 */
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+}
+
+.statCard {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.statCardQueued {
+  border-left: 3px solid var(--text-muted);
+}
+
+.statCardRunning {
+  border-left: 3px solid var(--accent);
+}
+
+.statCardCompleted {
+  border-left: 3px solid var(--success);
+}
+
+.statCardFailed {
+  border-left: 3px solid var(--danger);
+}
+
+.statCardHigh {
+  border-left: 3px solid #fb923c;
+}
+
+.statCardMedium {
+  border-left: 3px solid #fbbf24;
+}
+
+.statLabel {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.statValue {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.statValueMuted {
+  color: var(--text-muted);
+}
+
+/* 큐 상태 카드 */
+.queueCard {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.queueGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 16px;
+}
+
+.queueItem {
+  text-align: center;
+}
+
+.queueLabel {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.queueValue {
+  font-size: 24px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.queueValueDanger {
+  color: var(--danger);
+}
+
+.queueStatus {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.queueStatusActive {
+  color: var(--success);
+}
+
+.queueStatusInactive {
+  color: var(--danger);
+}
+
+.queueStatusIdle {
+  color: var(--text-muted);
+}
+
+/* 필터 바 */
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+  align-items: flex-end;
+}
+
+.filterGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filterLabel {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.filterSelect {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  min-width: 110px;
+}
+
+.filterSelect:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.searchInput {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-width: 200px;
+  width: 100%;
+}
+
+.searchInput::placeholder {
+  color: var(--text-muted);
+}
+
+.searchInput:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.sortButton {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sortButton:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+/* 뱃지 공통 */
+.statusBadge,
+.engineBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status_queued {
+  background: rgba(163, 163, 163, 0.15);
+  color: var(--text-muted);
+}
+
+.status_running {
+  background: rgba(45, 212, 191, 0.15);
+  color: var(--accent);
+}
+
+.status_completed {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+
+.status_failed {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+}
+
+.engine_semgrep {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.engine_trivy {
+  background: rgba(167, 139, 250, 0.15);
+  color: #a78bfa;
+}
+
+.engine_gitleaks {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+/* Findings 요약 (인라인) */
+.findingsSummary {
+  display: inline-flex;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.noFindings {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.findingCritical {
+  color: #f87171;
+}
+
+.findingHigh {
+  color: #fb923c;
+}
+
+.findingMedium {
+  color: #fbbf24;
+}
+
+.findingLow {
+  color: #a3a3a3;
+}
+
+/* 데스크톱 테이블 */
+.tableWrapper {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.th {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.row {
+  transition: background 0.12s;
+}
+
+.row:hover {
+  background: var(--bg-surface-hover);
+}
+
+.td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.875rem;
+  vertical-align: middle;
+}
+
+.scanLink {
+  text-decoration: none;
+}
+
+.scanId {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.scanId:hover {
+  text-decoration: underline;
+}
+
+.repoUrl {
+  font-size: 13px;
+  color: var(--text-secondary);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+.dateText {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* 빈 상태 */
+.emptyState {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.loadingState {
+  text-align: center;
+  padding: 80px 20px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* 모바일 카드 리스트 */
+.mobileList {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mobileCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  text-decoration: none;
+  color: var(--text-primary);
+  transition: background 0.12s;
+}
+
+.mobileCard:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-accent);
+}
+
+.mobileCardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mobileCardRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobileCardRepo {
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobileCardFooter {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* 데스크톱에서 테이블 보이기, 모바일에서 카드 보이기 */
+.desktopTable {
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .desktopTable {
+    display: none;
+  }
+
+  .mobileList {
+    display: flex;
+  }
+
+  .statsGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .queueGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .filterBar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filterGroup {
+    width: 100%;
+  }
+
+  .filterSelect,
+  .searchInput {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .statsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .container {
+    padding: 16px 12px;
+  }
+}

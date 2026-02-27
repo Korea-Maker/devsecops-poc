@@ -1,0 +1,251 @@
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 40px 20px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.backLink {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  transition: color 0.15s;
+}
+
+.backLink:hover {
+  color: var(--accent);
+}
+
+.reportBtn {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+
+.reportBtn:hover {
+  background: rgba(45, 212, 191, 0.2);
+}
+
+.title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-bottom: 32px;
+}
+
+.section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.sectionTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 16px;
+}
+
+.statusRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.guideText {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.statusQueued {
+  background: rgba(163, 163, 163, 0.15);
+  color: #a3a3a3;
+  border: 1px solid #a3a3a3;
+}
+
+.statusRunning {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.statusCompleted {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+  border: 1px solid var(--success);
+}
+
+.statusFailed {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.engineBadge {
+  background: rgba(45, 212, 191, 0.1);
+  color: var(--accent);
+  border: 1px solid var(--border-accent);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+@media (min-width: 640px) {
+  .metaGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.metaItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metaLabel {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+}
+
+.metaCode {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  background: var(--bg-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.metaValue {
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.findingsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+@media (min-width: 640px) {
+  .findingsGrid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+.findingCard {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-top-width: 3px;
+  border-radius: 8px;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.findingLabel {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.findingCount {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.errorCodeRow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.errorCodeHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.errorBadge {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  width: fit-content;
+}
+
+.errorGuide {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  background: rgba(248, 113, 113, 0.05);
+  border-left: 3px solid var(--danger);
+  border-radius: 0 4px 4px 0;
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.errorPre {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--danger);
+  line-height: 1.6;
+}
+
+.stateText {
+  color: var(--text-secondary);
+  font-size: 1rem;
+  margin-bottom: 16px;
+}
