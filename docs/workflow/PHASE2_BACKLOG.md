@@ -230,6 +230,29 @@ const scans: Map<string, ScanResultSummary> = new Map();
 
 ---
 
+## Phase 2-3 완료 항목
+
+> 업데이트: 2026-02-27
+> 목적: in-memory 비동기 스캔 큐(Job Queue) 스켈레톤 도입 및 API 연동 완료 내역 기록
+
+### 완료 체크리스트
+
+- [x] `scanner/queue.ts` 신규 추가: `enqueueScan`, `getQueueSize`, `processNextScanJob`, `startScanWorker`, `stopScanWorker` 구현
+- [x] 큐 처리 상태 전이 적용: `queued -> running -> completed` (mock 지연 처리, 외부 CLI 호출 없음)
+- [x] `scanner/store.ts` 확장: `updateScanStatus(id, status)` 추가 및 종료 시각(`completedAt`) 기록
+- [x] `POST /api/v1/scans` 연동: `createScan` 직후 `enqueueScan(scanId)` 호출
+- [x] 서버 시작/종료 시 워커 라이프사이클 연결: 시작 시 worker start, 종료 시 stop
+- [x] 큐 동작 테스트 추가: enqueue 후 `processNextScanJob` 호출 시 상태 전이 검증(결정적 fake timer 기반)
+
+### 남은 TODO (Phase 2-4+)
+
+- [ ] 실제 스캐너 실행 파이프라인 연결(semgrep/trivy/gitleaks CLI 실행은 다음 단계에서 구현)
+- [ ] 큐 영속화(프로세스 재시작 내구성) 또는 외부 큐로 전환 검토
+- [ ] 실패 재시도/백오프 정책 및 dead-letter 처리
+- [ ] 스캔 결과 상세 저장소(DB)와 상태 전이 이벤트 기록 확장
+
+---
+
 ## 참고 문서
 
 - `DECISIONS.md` — Phase 1 확정 의사결정

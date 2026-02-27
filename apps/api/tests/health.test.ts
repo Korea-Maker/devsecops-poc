@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import request from "supertest";
 import { buildApp } from "../src/app.js";
 
 describe("GET /health", () => {
@@ -14,9 +13,12 @@ describe("GET /health", () => {
   });
 
   it("200과 함께 { ok: true, service: 'api' }를 반환해야 한다", async () => {
-    const response = await request(app.server).get("/health");
+    const response = await app.inject({
+      method: "GET",
+      url: "/health",
+    });
 
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual({ ok: true, service: "api" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, service: "api" });
   });
 });

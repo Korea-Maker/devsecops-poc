@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
 import { createScan, getScan, listScans } from "../scanner/store.js";
+import { enqueueScan } from "../scanner/queue.js";
 
 /** 유효한 스캔 엔진 목록 */
 const VALID_ENGINES: ScanEngineType[] = ["semgrep", "trivy", "gitleaks"];
@@ -46,6 +47,7 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
       repoUrl,
       branch: typeof branch === "string" && branch.length > 0 ? branch : "main",
     });
+    enqueueScan(record.id);
 
     return reply.status(202).send({ scanId: record.id, status: record.status });
   });
