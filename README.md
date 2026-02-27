@@ -68,6 +68,7 @@
   - 원격 저장소 URL(`http/https/ssh/git@/file://`)이면 스캔 전 임시 디렉터리에 `git clone --depth 1 --branch <branch>` 수행
   - 어댑터에는 clone된 로컬 경로를 전달해 CLI를 실행하고, 처리 성공/실패와 무관하게 임시 clone 정리(cleanup)
 - 실패 처리: retry + exponential backoff + dead-letter 지원
+- 워커 중지 정책: `stopScanWorker()` 호출 시 pending retry timer를 모두 취소해 stop 이후 예기치 않은 재enqueue를 방지
 
 주요 스캔 환경변수:
 

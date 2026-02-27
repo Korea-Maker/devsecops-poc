@@ -7,12 +7,36 @@ import type { ScanExecutionMode } from "./adapters/common.js";
 
 const execFileAsync = promisify(execFile);
 const SOURCE_PREP_TIMEOUT_MS = 60_000;
+const SCANNER_QUEUE_LOG_PREFIX = "[scanner-queue]";
 
 export type RepoUrlInputKind = "local-directory" | "remote-repository" | "unsupported";
+export type SourcePrepErrorCode =
+  | "SOURCE_PREP_CLONE_FAILED"
+  | "SOURCE_PREP_UNSUPPORTED_REPO_URL";
 
 export interface PreparedScanSource {
   repoUrl: string;
   cleanup: () => Promise<void>;
+}
+
+export class SourcePrepError extends Error {
+  readonly code: SourcePrepErrorCode;
+  readonly details?: Record<string, string>;
+
+  constructor(
+    code: SourcePrepErrorCode,
+    message: string,
+    options?: { cause?: unknown; details?: Record<string, string> }
+  ) {
+    super(message, { cause: options?.cause });
+    this.name = "SourcePrepError";
+    this.code = code;
+    this.details = options?.details;
+  }
+}
+
+export function isSourcePrepError(error: unknown): error is SourcePrepError {
+  return error instanceof SourcePrepError;
 }
 
 const noopCleanup = async (): Promise<void> => {
@@ -83,8 +107,14 @@ export async function prepareScanSource(
     return cloneRemoteRepository(normalizedRepoUrl, branch);
   }
 
-  throw new Error(
-    `[source-prep] native 소스 준비 실패: 로컬 경로가 아니며 지원하지 않는 저장소 주소입니다 (${normalizedRepoUrl})`
+  throw new SourcePrepError(
+    "SOURCE_PREP_UNSUPPORTED_REPO_URL",
+    `[source-prep] native 소스 준비 실패: 로컬 경로가 아니며 지원하지 않는 저장소 주소입니다 (${normalizedRepoUrl})`,
+    {
+      details: {
+        repoUrl: normalizedRepoUrl,
+      },
+    }
   );
 }
 
@@ -115,12 +145,23 @@ async function cloneRemoteRepository(
       cleanup,
     };
   } catch (error) {
-    await cleanup().catch(() => {
-      // clone 실패 정리 중 에러는 원본 실패 원인을 가리지 않기 위해 무시
+    await cleanup().catch((cleanupError) => {
+      // clone 실패 정리 중 에러는 원본 실패 원인을 가리지 않되, 관측 로그는 남긴다.
+      console.warn(
+        `${SCANNER_QUEUE_LOG_PREFIX} source cleanup 실패 (repoUrl=${repoUrl}, branch=${branch}): ${getErrorReason(cleanupError)}`
+      );
     });
 
-    throw new Error(
-      `[source-prep] native 소스 준비 실패: git clone 실패 (repoUrl=${repoUrl}, branch=${branch}): ${getErrorReason(error)}`
+    throw new SourcePrepError(
+      "SOURCE_PREP_CLONE_FAILED",
+      `[source-prep] native 소스 준비 실패: git clone 실패 (repoUrl=${repoUrl}, branch=${branch}): ${getErrorReason(error)}`,
+      {
+        cause: error,
+        details: {
+          repoUrl,
+          branch,
+        },
+      }
     );
   }
 }

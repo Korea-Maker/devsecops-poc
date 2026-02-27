@@ -3,10 +3,12 @@ import {
   clearQueue,
   enqueueScan,
   getDeadLetterSize,
+  getPendingRetryTimerCount,
   getQueueSize,
   listDeadLetters,
   processNextScanJob,
   redriveDeadLetter,
+  setCleanupFailureForTest,
   setScanForcedFailuresForTest,
   stopScanWorker,
 } from "../src/scanner/queue.js";
@@ -204,6 +206,56 @@ describe("Scan Queue", () => {
     expect(getScan(record.id)?.status).toBe("failed");
     expect(getDeadLetterSize()).toBe(1);
     expect(listDeadLetters()[0]?.scanId).toBe(record.id);
+  });
+
+  it("stopScanWorker 호출 시 pending retry timer를 모두 취소해 재enqueue를 막아야 한다", async () => {
+    const record = createScan({
+      engine: "semgrep",
+      repoUrl: "https://github.com/test/repo-stop-retry-cancel",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+    setScanForcedFailuresForTest(record.id, 1);
+
+    vi.useFakeTimers();
+
+    const firstJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await firstJobPromise;
+
+    expect(getScan(record.id)?.status).toBe("queued");
+    expect(getPendingRetryTimerCount()).toBe(1);
+    expect(getQueueSize()).toBe(0);
+
+    stopScanWorker();
+
+    expect(getPendingRetryTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getQueueSize()).toBe(0);
+  });
+
+  it("cleanup 실패는 상태를 덮어쓰지 않고 warn 로그로 관측되어야 한다", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const record = createScan({
+      engine: "semgrep",
+      repoUrl: "https://github.com/test/repo-cleanup-warn",
+      branch: "main",
+    });
+    setCleanupFailureForTest(record.id, true);
+    enqueueScan(record.id);
+
+    vi.useFakeTimers();
+
+    const jobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await jobPromise;
+
+    expect(getScan(record.id)?.status).toBe("completed");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("[scanner-queue]");
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("source cleanup 실패");
+
+    warnSpy.mockRestore();
   });
 
   it("dead-letter 재처리 성공 시 queued 상태로 되돌리고 큐에 다시 등록해야 한다", async () => {

@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { classifyRepoUrlInput, prepareScanSource } from "../src/scanner/source-prep.js";
+import {
+  SourcePrepError,
+  classifyRepoUrlInput,
+  isSourcePrepError,
+  prepareScanSource,
+} from "../src/scanner/source-prep.js";
 
 const TEMP_DIRS_FOR_CLEANUP: string[] = [];
 
@@ -97,9 +102,29 @@ describe("prepareScanSource", () => {
     );
   });
 
-  it("native 모드에서 ftp:// 스킴은 지원하지 않는 저장소 주소 에러를 반환해야 한다", async () => {
-    await expect(prepareScanSource("ftp://example.com/repo.git", "main", "native")).rejects.toThrow(
-      "지원하지 않는 저장소 주소"
-    );
+  it("native 모드에서 ftp:// 스킴은 구조화된 unsupported 에러 코드를 반환해야 한다", async () => {
+    try {
+      await prepareScanSource("ftp://example.com/repo.git", "main", "native");
+      throw new Error("unsupported 에러가 발생해야 한다");
+    } catch (error) {
+      expect(isSourcePrepError(error)).toBe(true);
+      expect(error).toBeInstanceOf(SourcePrepError);
+      expect((error as SourcePrepError).code).toBe("SOURCE_PREP_UNSUPPORTED_REPO_URL");
+      expect((error as SourcePrepError).message).toContain("지원하지 않는 저장소 주소");
+    }
+  });
+
+  it("native 모드에서 clone 실패 시 구조화된 clone 실패 에러 코드를 반환해야 한다", async () => {
+    const repoUrl = "file:///this/path/does/not/exist/repo.git";
+
+    try {
+      await prepareScanSource(repoUrl, "main", "native");
+      throw new Error("clone 실패 에러가 발생해야 한다");
+    } catch (error) {
+      expect(isSourcePrepError(error)).toBe(true);
+      expect(error).toBeInstanceOf(SourcePrepError);
+      expect((error as SourcePrepError).code).toBe("SOURCE_PREP_CLONE_FAILED");
+      expect((error as SourcePrepError).message).toContain("git clone 실패");
+    }
   });
 });

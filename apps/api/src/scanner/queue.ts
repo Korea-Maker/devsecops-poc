@@ -9,6 +9,7 @@ const DEFAULT_WORKER_INTERVAL_MS = 250;
 const MOCK_SCAN_DURATION_MS = 30;
 const DEFAULT_RETRY_BACKOFF_BASE_MS = 100;
 const DEFAULT_MAX_RETRY_COUNT = 2;
+const SCANNER_QUEUE_LOG_PREFIX = "[scanner-queue]";
 
 /** 인메모리 FIFO 스캔 작업 큐 */
 const scanJobQueue: string[] = [];
@@ -29,6 +30,8 @@ const retryTimers = new Set<NodeJS.Timeout>();
 
 // 테스트에서 특정 scanId를 의도적으로 n회 실패시키기 위한 주입 훅
 const forcedFailureByScanId = new Map<string, number>();
+// 테스트에서 cleanup 실패 관측 경로를 검증하기 위한 주입 훅
+const forcedCleanupFailureByScanId = new Set<string>();
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -166,6 +169,17 @@ export function setScanForcedFailuresForTest(scanId: string, failures: number): 
   forcedFailureByScanId.set(scanId, failures);
 }
 
+/**
+ * 테스트 훅: 특정 scanId의 cleanup을 의도적으로 실패시킵니다.
+ */
+export function setCleanupFailureForTest(scanId: string, shouldFail: boolean): void {
+  if (shouldFail) {
+    forcedCleanupFailureByScanId.add(scanId);
+    return;
+  }
+  forcedCleanupFailureByScanId.delete(scanId);
+}
+
 function consumeForcedFailure(scanId: string): boolean {
   const remaining = forcedFailureByScanId.get(scanId);
   if (!remaining || remaining <= 0) {
@@ -188,6 +202,27 @@ function scheduleRetry(scanId: string, backoffMs: number): void {
   }, backoffMs);
 
   retryTimers.add(retryTimer);
+}
+
+function clearPendingRetryTimers(): void {
+  for (const retryTimer of retryTimers) {
+    clearTimeout(retryTimer);
+  }
+  retryTimers.clear();
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return "알 수 없는 오류";
+}
+
+/**
+ * 현재 대기 중인 retry 타이머 개수를 반환합니다.
+ */
+export function getPendingRetryTimerCount(): number {
+  return retryTimers.size;
 }
 
 /**
@@ -258,7 +293,7 @@ export async function processNextScanJob(): Promise<boolean> {
     const retryCount = latest.retryCount ?? 0;
     const maxRetryCount = getMaxRetryCount();
     const retryBackoffBaseMs = getRetryBackoffBaseMs();
-    const errorMessage = error instanceof Error ? error.message : "알 수 없는 오류";
+    const errorMessage = toErrorMessage(error);
 
     if (retryCount < maxRetryCount) {
       const nextRetryCount = retryCount + 1;
@@ -290,8 +325,14 @@ export async function processNextScanJob(): Promise<boolean> {
     if (sourceCleanup) {
       try {
         await sourceCleanup();
-      } catch {
-        // 정리 실패는 스캔 결과 상태를 덮어쓰지 않도록 무시한다.
+        if (forcedCleanupFailureByScanId.has(scanId)) {
+          throw new Error("테스트 cleanup 강제 실패");
+        }
+      } catch (cleanupError) {
+        // 정리 실패는 스캔 결과 상태를 덮어쓰지 않되, 관측 가능하게 로그를 남긴다.
+        console.warn(
+          `${SCANNER_QUEUE_LOG_PREFIX} source cleanup 실패 (scanId=${scanId}): ${toErrorMessage(cleanupError)}`
+        );
       }
     }
 
@@ -316,13 +357,15 @@ export function startScanWorker(intervalMs = DEFAULT_WORKER_INTERVAL_MS): void {
 
 /**
  * 실행 중인 큐 워커를 중지합니다.
+ * 정책: 워커 중지 시점에 pending retry timer도 모두 취소한다.
+ * - 목적: stop 이후 retry timer 잔존으로 인한 예기치 않은 재enqueue 방지
  */
 export function stopScanWorker(): void {
-  if (!workerTimer) {
-    return;
+  if (workerTimer) {
+    clearInterval(workerTimer);
+    workerTimer = null;
   }
-  clearInterval(workerTimer);
-  workerTimer = null;
+  clearPendingRetryTimers();
 }
 
 /**
@@ -332,9 +375,6 @@ export function clearQueue(): void {
   scanJobQueue.length = 0;
   deadLetterQueue.length = 0;
   forcedFailureByScanId.clear();
-
-  for (const retryTimer of retryTimers) {
-    clearTimeout(retryTimer);
-  }
-  retryTimers.clear();
+  forcedCleanupFailureByScanId.clear();
+  clearPendingRetryTimers();
 }
