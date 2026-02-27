@@ -4,6 +4,13 @@ export type ScanEngineType = 'semgrep' | 'trivy' | 'gitleaks';
 /** 스캔 상태 */
 export type ScanStatus = 'queued' | 'running' | 'completed' | 'failed';
 
+/** 스캔 실행/소스 준비 과정에서 노출되는 오류 코드 */
+export type ScanErrorCode =
+  | 'SOURCE_PREP_CLONE_FAILED'
+  | 'SOURCE_PREP_UNSUPPORTED_REPO_URL'
+  | 'SCAN_EXECUTION_FAILED'
+  | 'SCAN_UNKNOWN_ERROR';
+
 /** 스캔 요청 */
 export interface ScanRequest {
   id: string;

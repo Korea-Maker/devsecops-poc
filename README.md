@@ -47,7 +47,7 @@
 
 ---
 
-## 현재 구현 상태 (Phase 2-7 기준)
+## 현재 구현 상태 (Phase 2-9 기준)
 
 ### API (`apps/api`)
 
@@ -56,8 +56,20 @@
   - `repoUrl` 입력 계약: 로컬 디렉터리 경로 또는 `http/https/ssh/file://`, `git@...` 형식 허용 (`ftp://` 등 미지원 스킴/빈 문자열은 거부)
 - `GET /api/v1/scans` → 스캔 목록 조회 (`status` 필터 지원)
 - `GET /api/v1/scans/:id` → 단일 스캔 상태 조회 (완료 시 `findings` 요약 포함)
+  - 실패/재시도 상태에서는 `lastError`, `lastErrorCode` 확인 가능
 - `GET /api/v1/scans/dead-letters` → dead-letter 목록 조회
 - `POST /api/v1/scans/:id/redrive` → dead-letter 재처리 요청
+- `GET /api/v1/scans/queue/status` → 큐 운영 상태 조회
+  - 응답: `{ queuedJobs, deadLetters, pendingRetryTimers, workerRunning, processing }`
+- `POST /api/v1/scans/queue/process-next` → 워커와 별개로 즉시 다음 작업 1건 처리
+  - 응답: `{ processed: boolean, busy: boolean }`
+    - `processed=false, busy=false`: 처리할 작업 없음(empty)
+    - `processed=false, busy=true`: 이미 다른 작업 처리 중(busy)
+
+오류 응답 계약(scans 라우트):
+
+- 공통 shape: `{ error: string, code?: string }`
+- 예: `SCAN_INVALID_ENGINE`, `SCAN_INVALID_REPO_URL`, `SCAN_NOT_FOUND`, `DEAD_LETTER_NOT_FOUND`
 
 스캔 워커 동작:
 
@@ -75,6 +87,16 @@
 - `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
 - `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
+
+### 운영/관리 API 사용 예시
+
+```bash
+# 큐 상태 조회
+curl -s http://localhost:3001/api/v1/scans/queue/status
+
+# 대기 중인 다음 작업 1건 즉시 처리
+curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
+```
 
 ### Web (`apps/web`)
 

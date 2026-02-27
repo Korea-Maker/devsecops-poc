@@ -5,6 +5,7 @@ import {
   getDeadLetterSize,
   getPendingRetryTimerCount,
   getQueueSize,
+  getQueueStatus,
   listDeadLetters,
   processNextScanJob,
   redriveDeadLetter,
@@ -44,9 +45,9 @@ describe("Scan Queue", () => {
     vi.useRealTimers();
   });
 
-  it("처리할 job이 없으면 false를 반환해야 한다", async () => {
-    const processed = await processNextScanJob();
-    expect(processed).toBe(false);
+  it("처리할 job이 없으면 processed=false, busy=false를 반환해야 한다", async () => {
+    const processResult = await processNextScanJob();
+    expect(processResult).toEqual({ processed: false, busy: false });
   });
 
   it("enqueue 후 processNextScanJob 호출 시 queued -> running -> completed로 전이되어야 한다", async () => {
@@ -67,9 +68,9 @@ describe("Scan Queue", () => {
     expect(getScan(record.id)?.status).toBe("running");
 
     await vi.advanceTimersByTimeAsync(40);
-    const processed = await jobPromise;
+    const processResult = await jobPromise;
 
-    expect(processed).toBe(true);
+    expect(processResult).toEqual({ processed: true, busy: false });
     expect(getQueueSize()).toBe(0);
     expect(getScan(record.id)?.status).toBe("completed");
     expect(getScan(record.id)?.completedAt).toBeDefined();
@@ -82,6 +83,25 @@ describe("Scan Queue", () => {
         (findings?.medium ?? 0) +
         (findings?.low ?? 0)
     );
+  });
+
+  it("queue 상태는 processing 필드로 현재 처리 여부를 노출해야 한다", async () => {
+    const record = createScan({
+      engine: "semgrep",
+      repoUrl: "https://github.com/test/repo-processing-status",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+
+    vi.useFakeTimers();
+
+    const jobPromise = processNextScanJob();
+    expect(getQueueStatus().processing).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(40);
+    await jobPromise;
+
+    expect(getQueueStatus().processing).toBe(false);
   });
 
   it("1회 실패 후 재시도 성공 시 queued -> running -> queued(retry) -> running -> completed로 전이되어야 한다", async () => {

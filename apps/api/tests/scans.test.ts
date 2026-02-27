@@ -152,6 +152,7 @@ describe("Scans API", () => {
 
       expect(response.statusCode).toBe(400);
       expect(response.json()).toHaveProperty("error");
+      expect(response.json().code).toBe("SCAN_INVALID_ENGINE");
     });
 
     it("engine이 누락되면 400을 반환해야 한다", async () => {
@@ -174,6 +175,7 @@ describe("Scans API", () => {
 
       expect(response.statusCode).toBe(400);
       expect(response.json()).toHaveProperty("error");
+      expect(response.json().code).toBe("SCAN_INVALID_REPO_URL");
     });
 
     it("ftp:// 스킴 repoUrl이면 400을 반환해야 한다", async () => {
@@ -206,6 +208,21 @@ describe("Scans API", () => {
       });
 
       expect(response.statusCode).toBe(400);
+      expect(response.json()).toHaveProperty("error");
+    });
+
+    it("invalid JSON 요청은 500이 아닌 4xx를 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          "content-type": "application/json",
+        },
+        payload: '{"engine":"semgrep",',
+      });
+
+      expect(response.statusCode).toBeGreaterThanOrEqual(400);
+      expect(response.statusCode).toBeLessThan(500);
       expect(response.json()).toHaveProperty("error");
     });
   });
@@ -259,6 +276,32 @@ describe("Scans API", () => {
       );
     });
 
+    it("실패 후 재시도 대기 상태 조회 시 lastErrorCode를 확인할 수 있어야 한다", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-last-error-code" },
+      });
+
+      const { scanId } = createRes.json();
+      setScanForcedFailuresForTest(scanId, 1);
+
+      vi.useFakeTimers();
+      const jobPromise = processNextScanJob();
+      await vi.advanceTimersByTimeAsync(40);
+      await jobPromise;
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+      });
+
+      expect(getRes.statusCode).toBe(200);
+      expect(getRes.json().status).toBe("queued");
+      expect(getRes.json().lastError).toBeDefined();
+      expect(getRes.json().lastErrorCode).toBe("SCAN_EXECUTION_FAILED");
+    });
+
     it("존재하지 않는 스캔을 조회하면 404를 반환해야 한다", async () => {
       const response = await app.inject({
         method: "GET",
@@ -266,6 +309,10 @@ describe("Scans API", () => {
       });
 
       expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        error: "스캔을 찾을 수 없습니다",
+        code: "SCAN_NOT_FOUND",
+      });
     });
   });
 
@@ -314,6 +361,114 @@ describe("Scans API", () => {
       for (const scan of body) {
         expect(scan.status).toBe("queued");
       }
+    });
+  });
+
+  describe("Queue Admin API", () => {
+    it("GET /api/v1/scans/queue/status는 기본 큐 상태를 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/queue/status",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        queuedJobs: 0,
+        deadLetters: 0,
+        pendingRetryTimers: 0,
+        workerRunning: false,
+        processing: false,
+      });
+    });
+
+    it("GET /api/v1/scans/queue/status는 처리 중이면 processing=true를 반환해야 한다", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-status-processing" },
+      });
+
+      vi.useFakeTimers();
+
+      const inFlightJobPromise = processNextScanJob();
+
+      const statusDuringProcessing = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/queue/status",
+      });
+
+      expect(statusDuringProcessing.statusCode).toBe(200);
+      expect(statusDuringProcessing.json().processing).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(40);
+      await inFlightJobPromise;
+
+      const statusAfterProcessing = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/queue/status",
+      });
+
+      expect(statusAfterProcessing.statusCode).toBe(200);
+      expect(statusAfterProcessing.json().processing).toBe(false);
+    });
+
+    it("POST /api/v1/scans/queue/process-next는 큐가 비어 있으면 processed=false, busy=false를 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ processed: false, busy: false });
+    });
+
+    it("POST /api/v1/scans/queue/process-next는 처리 중이면 busy=true를 반환해야 한다", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "trivy", repoUrl: "https://github.com/test/repo-process-next-busy" },
+      });
+
+      vi.useFakeTimers();
+
+      const inFlightJobPromise = processNextScanJob();
+
+      const secondProcessResponse = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+      });
+
+      expect(secondProcessResponse.statusCode).toBe(200);
+      expect(secondProcessResponse.json()).toEqual({ processed: false, busy: true });
+
+      await vi.advanceTimersByTimeAsync(40);
+      await inFlightJobPromise;
+    });
+
+    it("POST /api/v1/scans/queue/process-next는 큐에 작업이 있으면 즉시 1건 처리해야 한다", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-process-next" },
+      });
+
+      const { scanId } = createRes.json();
+
+      const processRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+      });
+
+      expect(processRes.statusCode).toBe(200);
+      expect(processRes.json()).toEqual({ processed: true, busy: false });
+
+      const scanRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+      });
+
+      expect(scanRes.statusCode).toBe(200);
+      expect(scanRes.json().status).toBe("completed");
     });
   });
 
@@ -372,6 +527,7 @@ describe("Scans API", () => {
       expect(scanRes.json().status).toBe("queued");
       expect(scanRes.json().retryCount).toBe(0);
       expect(scanRes.json().lastError).toBeUndefined();
+      expect(scanRes.json().lastErrorCode).toBeUndefined();
     });
 
     it("dead-letter에 없는 scanId redrive 요청 시 404를 반환해야 한다", async () => {
@@ -390,6 +546,7 @@ describe("Scans API", () => {
 
       expect(redriveRes.statusCode).toBe(404);
       expect(redriveRes.json()).toHaveProperty("error");
+      expect(redriveRes.json().code).toBe("DEAD_LETTER_NOT_FOUND");
     });
 
     it("orphan dead-letter redrive 요청 시 409를 반환하고 dead-letter를 유지해야 한다", async () => {
@@ -411,6 +568,7 @@ describe("Scans API", () => {
 
       expect(redriveRes.statusCode).toBe(409);
       expect(redriveRes.json()).toHaveProperty("error");
+      expect(redriveRes.json().code).toBe("DEAD_LETTER_ORPHANED_SCAN");
       expect(redriveRes.json().error).toContain("orphaned_scan");
 
       const deadLettersRes = await app.inject({

@@ -1,5 +1,10 @@
 import { randomUUID } from "crypto";
-import type { ScanEngineType, ScanResultSummary, ScanStatus } from "./types.js";
+import type {
+  ScanEngineType,
+  ScanErrorCode,
+  ScanResultSummary,
+  ScanStatus,
+} from "./types.js";
 
 export type ScanFindingsSummary = Pick<
   ScanResultSummary,
@@ -17,6 +22,7 @@ export interface ScanRecord {
   completedAt?: string;
   retryCount: number;
   lastError?: string;
+  lastErrorCode?: ScanErrorCode;
   findings?: ScanFindingsSummary;
 }
 
@@ -102,6 +108,7 @@ export function updateScanMeta(
   patch: {
     retryCount?: number;
     lastError?: string | null;
+    lastErrorCode?: ScanErrorCode | null;
     findings?: ScanFindingsSummary | null;
   }
 ): ScanRecord | undefined {
@@ -122,6 +129,12 @@ export function updateScanMeta(
     delete next.lastError;
   } else if (patch.lastError !== undefined) {
     next.lastError = patch.lastError;
+  }
+
+  if (patch.lastErrorCode === null) {
+    delete next.lastErrorCode;
+  } else if (patch.lastErrorCode !== undefined) {
+    next.lastErrorCode = patch.lastErrorCode;
   }
 
   if (patch.findings === null) {

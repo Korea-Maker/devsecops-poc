@@ -1,9 +1,9 @@
 import { getScanExecutionMode } from "./adapters/common.js";
 import { getAdapter } from "./registry.js";
-import { prepareScanSource } from "./source-prep.js";
+import { isSourcePrepError, prepareScanSource } from "./source-prep.js";
 import { getScan, updateScanMeta, updateScanStatus } from "./store.js";
 import type { ScanRecord } from "./store.js";
-import type { ScanRequest } from "./types.js";
+import type { ScanErrorCode, ScanRequest } from "./types.js";
 
 const DEFAULT_WORKER_INTERVAL_MS = 250;
 const MOCK_SCAN_DURATION_MS = 30;
@@ -19,10 +19,30 @@ interface DeadLetterItem {
   scanId: string;
   retryCount: number;
   error: string;
+  code?: ScanRuntimeErrorCode;
   failedAt: string;
 }
 
 export type RedriveDeadLetterResult = "accepted" | "not_found" | "orphaned_scan";
+export type ScanRuntimeErrorCode = ScanErrorCode;
+
+interface ScanRuntimeErrorInfo {
+  code: ScanRuntimeErrorCode;
+  message: string;
+}
+
+export interface ScanQueueStatus {
+  queuedJobs: number;
+  deadLetters: number;
+  pendingRetryTimers: number;
+  workerRunning: boolean;
+  processing: boolean;
+}
+
+export interface ProcessNextScanJobResult {
+  processed: boolean;
+  busy: boolean;
+}
 
 let workerTimer: NodeJS.Timeout | null = null;
 let isProcessing = false;
@@ -145,6 +165,7 @@ export function redriveDeadLetter(scanId: string): RedriveDeadLetterResult {
   const updatedMeta = updateScanMeta(scanId, {
     retryCount: 0,
     lastError: null,
+    lastErrorCode: null,
     findings: null,
   });
   const updatedStatus = updateScanStatus(scanId, "queued");
@@ -218,6 +239,34 @@ function toErrorMessage(error: unknown): string {
   return "알 수 없는 오류";
 }
 
+function normalizeScanRuntimeError(error: unknown): ScanRuntimeErrorInfo {
+  if (isSourcePrepError(error)) {
+    if (error.code === "SOURCE_PREP_UNSUPPORTED_REPO_URL") {
+      return {
+        code: error.code,
+        message: "지원하지 않는 저장소 주소 형식입니다",
+      };
+    }
+
+    return {
+      code: error.code,
+      message: "스캔 소스 준비에 실패했습니다",
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      code: "SCAN_EXECUTION_FAILED",
+      message: "스캔 실행에 실패했습니다",
+    };
+  }
+
+  return {
+    code: "SCAN_UNKNOWN_ERROR",
+    message: "스캔 실행 중 알 수 없는 오류가 발생했습니다",
+  };
+}
+
 /**
  * 현재 대기 중인 retry 타이머 개수를 반환합니다.
  */
@@ -226,17 +275,38 @@ export function getPendingRetryTimerCount(): number {
 }
 
 /**
- * 큐에서 다음 스캔 작업 하나를 처리합니다.
- * 처리할 작업이 없으면 false를 반환합니다.
+ * 워커가 현재 실행 중인지 반환합니다.
  */
-export async function processNextScanJob(): Promise<boolean> {
+export function isScanWorkerRunning(): boolean {
+  return workerTimer !== null;
+}
+
+/**
+ * 큐 운영 상태를 요약해 반환합니다.
+ */
+export function getQueueStatus(): ScanQueueStatus {
+  return {
+    queuedJobs: getQueueSize(),
+    deadLetters: getDeadLetterSize(),
+    pendingRetryTimers: getPendingRetryTimerCount(),
+    workerRunning: isScanWorkerRunning(),
+    processing: isProcessing,
+  };
+}
+
+/**
+ * 큐에서 다음 스캔 작업 하나를 처리합니다.
+ * - busy: 이미 다른 작업을 처리 중인 상태
+ * - empty: 처리할 작업이 없는 상태
+ */
+export async function processNextScanJob(): Promise<ProcessNextScanJobResult> {
   if (isProcessing) {
-    return false;
+    return { processed: false, busy: true };
   }
 
   const scanId = scanJobQueue.shift();
   if (!scanId) {
-    return false;
+    return { processed: false, busy: false };
   }
 
   isProcessing = true;
@@ -245,7 +315,7 @@ export async function processNextScanJob(): Promise<boolean> {
   try {
     const scan = getScan(scanId);
     if (!scan) {
-      return true;
+      return { processed: true, busy: false };
     }
 
     updateScanStatus(scanId, "running");
@@ -274,6 +344,7 @@ export async function processNextScanJob(): Promise<boolean> {
 
     updateScanMeta(scanId, {
       lastError: null,
+      lastErrorCode: null,
       findings: {
         totalFindings: result.totalFindings,
         critical: result.critical,
@@ -283,17 +354,17 @@ export async function processNextScanJob(): Promise<boolean> {
       },
     });
     updateScanStatus(scanId, "completed");
-    return true;
+    return { processed: true, busy: false };
   } catch (error) {
     const latest = getScan(scanId);
     if (!latest) {
-      return true;
+      return { processed: true, busy: false };
     }
 
     const retryCount = latest.retryCount ?? 0;
     const maxRetryCount = getMaxRetryCount();
     const retryBackoffBaseMs = getRetryBackoffBaseMs();
-    const errorMessage = toErrorMessage(error);
+    const runtimeError = normalizeScanRuntimeError(error);
 
     if (retryCount < maxRetryCount) {
       const nextRetryCount = retryCount + 1;
@@ -301,26 +372,29 @@ export async function processNextScanJob(): Promise<boolean> {
 
       updateScanMeta(scanId, {
         retryCount: nextRetryCount,
-        lastError: errorMessage,
+        lastError: runtimeError.message,
+        lastErrorCode: runtimeError.code,
         findings: null,
       });
       updateScanStatus(scanId, "queued");
       scheduleRetry(scanId, backoffMs);
-      return true;
+      return { processed: true, busy: false };
     }
 
     updateScanMeta(scanId, {
-      lastError: errorMessage,
+      lastError: runtimeError.message,
+      lastErrorCode: runtimeError.code,
       findings: null,
     });
     updateScanStatus(scanId, "failed");
     deadLetterQueue.push({
       scanId,
       retryCount,
-      error: errorMessage,
+      error: runtimeError.message,
+      code: runtimeError.code,
       failedAt: new Date().toISOString(),
     });
-    return true;
+    return { processed: true, busy: false };
   } finally {
     if (sourceCleanup) {
       try {
@@ -376,5 +450,6 @@ export function clearQueue(): void {
   deadLetterQueue.length = 0;
   forcedFailureByScanId.clear();
   forcedCleanupFailureByScanId.clear();
+  isProcessing = false;
   clearPendingRetryTimers();
 }
