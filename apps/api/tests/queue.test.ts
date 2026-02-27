@@ -6,20 +6,36 @@ import {
   getQueueSize,
   listDeadLetters,
   processNextScanJob,
+  redriveDeadLetter,
   setScanForcedFailuresForTest,
   stopScanWorker,
 } from "../src/scanner/queue.js";
 import { clearStore, createScan, getScan } from "../src/scanner/store.js";
+
+const ORIGINAL_RETRY_BACKOFF_BASE_MS = process.env.SCAN_RETRY_BACKOFF_BASE_MS;
+const ORIGINAL_MAX_RETRIES = process.env.SCAN_MAX_RETRIES;
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
 
 describe("Scan Queue", () => {
   beforeEach(() => {
     stopScanWorker();
     clearQueue();
     clearStore();
+    process.env.SCAN_RETRY_BACKOFF_BASE_MS = "100";
+    process.env.SCAN_MAX_RETRIES = "2";
     vi.useRealTimers();
   });
 
   afterEach(() => {
+    restoreEnv("SCAN_RETRY_BACKOFF_BASE_MS", ORIGINAL_RETRY_BACKOFF_BASE_MS);
+    restoreEnv("SCAN_MAX_RETRIES", ORIGINAL_MAX_RETRIES);
     vi.useRealTimers();
   });
 
@@ -134,5 +150,133 @@ describe("Scan Queue", () => {
     expect(getQueueSize()).toBe(0);
     expect(getDeadLetterSize()).toBe(1);
     expect(listDeadLetters()[0]?.scanId).toBe(record.id);
+  });
+
+  it("재시도 환경변수가 잘못되면 기본값(100ms, 2회)을 사용해야 한다", async () => {
+    process.env.SCAN_RETRY_BACKOFF_BASE_MS = "invalid";
+    process.env.SCAN_MAX_RETRIES = "-1";
+
+    const record = createScan({
+      engine: "trivy",
+      repoUrl: "https://github.com/test/repo-invalid-env-fallback",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+    setScanForcedFailuresForTest(record.id, 3);
+
+    vi.useFakeTimers();
+
+    const firstJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await firstJobPromise;
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(getQueueSize()).toBe(0);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(getQueueSize()).toBe(1);
+
+    const secondJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await secondJobPromise;
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getQueueSize()).toBe(0);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getQueueSize()).toBe(1);
+
+    const thirdJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await thirdJobPromise;
+
+    expect(getScan(record.id)?.status).toBe("failed");
+    expect(getDeadLetterSize()).toBe(1);
+    expect(listDeadLetters()[0]?.scanId).toBe(record.id);
+  });
+
+  it("dead-letter 재처리 성공 시 queued 상태로 되돌리고 큐에 다시 등록해야 한다", async () => {
+    const record = createScan({
+      engine: "gitleaks",
+      repoUrl: "https://github.com/test/repo-redrive-success",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+    setScanForcedFailuresForTest(record.id, 3);
+
+    vi.useFakeTimers();
+
+    const firstJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await firstJobPromise;
+
+    await vi.advanceTimersByTimeAsync(100);
+    const secondJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await secondJobPromise;
+
+    await vi.advanceTimersByTimeAsync(200);
+    const thirdJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await thirdJobPromise;
+
+    expect(getScan(record.id)?.status).toBe("failed");
+    expect(getScan(record.id)?.retryCount).toBe(2);
+    expect(getScan(record.id)?.lastError).toBeDefined();
+    expect(getDeadLetterSize()).toBe(1);
+
+    const redriveResult = redriveDeadLetter(record.id);
+    expect(redriveResult).toBe("accepted");
+    expect(getDeadLetterSize()).toBe(0);
+    expect(getQueueSize()).toBe(1);
+    expect(getScan(record.id)?.status).toBe("queued");
+    expect(getScan(record.id)?.retryCount).toBe(0);
+    expect(getScan(record.id)?.lastError).toBeUndefined();
+
+    const redriveJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await redriveJobPromise;
+
+    expect(getScan(record.id)?.status).toBe("completed");
+    expect(getScan(record.id)?.retryCount).toBe(0);
+    expect(getQueueSize()).toBe(0);
+  });
+
+  it("dead-letter에 없는 scanId를 redrive하면 not_found를 반환해야 한다", () => {
+    expect(redriveDeadLetter("missing-scan-id")).toBe("not_found");
+  });
+
+  it("dead-letter는 존재하지만 store에 스캔이 없으면 orphaned_scan을 반환하고 dead-letter를 유지해야 한다", async () => {
+    const record = createScan({
+      engine: "semgrep",
+      repoUrl: "https://github.com/test/repo-redrive-missing-store",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+    setScanForcedFailuresForTest(record.id, 3);
+
+    vi.useFakeTimers();
+
+    const firstJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await firstJobPromise;
+
+    await vi.advanceTimersByTimeAsync(100);
+    const secondJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await secondJobPromise;
+
+    await vi.advanceTimersByTimeAsync(200);
+    const thirdJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await thirdJobPromise;
+
+    expect(getDeadLetterSize()).toBe(1);
+
+    clearStore();
+
+    const redriveResult = redriveDeadLetter(record.id);
+    expect(redriveResult).toBe("orphaned_scan");
+    expect(getDeadLetterSize()).toBe(1);
+    expect(listDeadLetters()[0]?.scanId).toBe(record.id);
+    expect(getQueueSize()).toBe(0);
   });
 });

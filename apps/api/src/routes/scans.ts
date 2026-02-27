@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
 import { createScan, getScan, listScans } from "../scanner/store.js";
-import { enqueueScan } from "../scanner/queue.js";
+import { enqueueScan, listDeadLetters, redriveDeadLetter } from "../scanner/queue.js";
 
 /** 유효한 스캔 엔진 목록 */
 const VALID_ENGINES: ScanEngineType[] = ["semgrep", "trivy", "gitleaks"];
@@ -65,6 +65,33 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
 
       const scans = listScans(validStatus ? { status: validStatus } : undefined);
       return reply.status(200).send(scans);
+    }
+  );
+
+  /** GET /api/v1/scans/dead-letters — dead-letter 목록 조회 */
+  app.get("/api/v1/scans/dead-letters", async (_request, reply) => {
+    return reply.status(200).send(listDeadLetters());
+  });
+
+  /** POST /api/v1/scans/:id/redrive — dead-letter 재처리 요청 */
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/scans/:id/redrive",
+    async (request, reply) => {
+      const scanId = request.params.id;
+      const redriveResult = redriveDeadLetter(scanId);
+
+      if (redriveResult === "accepted") {
+        return reply.status(202).send({ scanId, status: "queued" });
+      }
+
+      if (redriveResult === "not_found") {
+        return reply.status(404).send({ error: "dead-letter 항목을 찾을 수 없습니다" });
+      }
+
+      return reply.status(409).send({
+        error:
+          "dead-letter 항목은 존재하지만 scan 레코드가 없어 재처리할 수 없습니다(orphaned_scan)",
+      });
     }
   );
 

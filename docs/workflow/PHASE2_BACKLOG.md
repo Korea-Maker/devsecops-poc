@@ -21,11 +21,11 @@
 ## 목표 1: 스캔 도메인 공통 타입 정의
 
 ### 설명
-`scanner/types.ts`에서 SAST, SCA, Secret 스캔의 공통 타입을 정의한다.
-- **ScanEngineType**: `'sast' | 'sca' | 'secret'`
-- **ScanRequest**: 스캔 요청 입력 (repositoryUrl, engineType, configId 등)
-- **ScanResultSummary**: 스캔 결과 요약 (스캔ID, 상태, 취약점 개수, 타임스탐프)
-- **ScanAdapter**: 모든 어댑터가 구현해야 할 인터페이스
+`scanner/types.ts`에서 스캔 도메인 공통 타입을 정의한다.
+- **ScanEngineType**: `'semgrep' | 'trivy' | 'gitleaks'`
+- **ScanRequest**: 스캔 요청 입력 (`id`, `engine`, `repoUrl`, `branch`, `status`, `createdAt`)
+- **ScanResultSummary**: 스캔 결과 요약 (`scanId`, `engine`, 취약점 카운트, `completedAt`)
+- **ScanAdapter**: 모든 어댑터가 구현해야 할 인터페이스(`scan(request)`)
 
 ### 검증 기준
 
@@ -33,7 +33,7 @@
 |-----|---------|
 | 타입 정의 완성 | `ScanEngineType`, `ScanRequest`, `ScanResultSummary`, `ScanAdapter` 모두 export 됨 |
 | 타입체크 통과 | `pnpm --filter @devsecops/api typecheck` 0 errors |
-| 인터페이스 명확성 | `ScanAdapter` 인터페이스에 `scan()`, `parseResults()` 메서드 시그니처 포함 |
+| 인터페이스 명확성 | `ScanAdapter` 인터페이스에 `scan(request)` 메서드 시그니처 포함 |
 | 상태 정의 | 스캔 상태: `'queued' \| 'running' \| 'completed' \| 'failed'` |
 
 ---
@@ -95,7 +95,7 @@
 | 기준 | 체크 항목 |
 |-----|---------|
 | Registry 함수 | `getAdapter()`, `listEngines()`, `isEngineSupported()` export |
-| 엔진 매핑 | `'sast'` → semgrep, `'sca'` → trivy, `'secret'` → gitleaks |
+| 엔진 매핑 | `'semgrep'` → semgrep, `'trivy'` → trivy, `'gitleaks'` → gitleaks |
 | 타입 안전 | registry 호출 시 정확한 어댑터 타입 반환 |
 | 커버리지 | `pnpm --filter @devsecops/api typecheck` 0 errors |
 
@@ -104,31 +104,34 @@
 ## 목표 4: POST /api/v1/scans → 202 큐 등록 응답
 
 ### 설명
-`routes/scans.ts`의 POST 엔드포인트를 구현한다. 스캔 요청을 받아 in-memory 저장소에 등록하고 `scanId`를 생성하여 202 응답으로 반환한다.
+`routes/scans.ts`의 POST 엔드포인트를 구현한다. 스캔 요청을 받아 in-memory 저장소에 등록하고, 현재 구현 계약에 맞는 202 응답을 반환한다.
 
-#### 요청 (Request)
+#### 현재 구현 계약 (Current Contract)
+
+##### 요청 (Request)
 ```json
 {
-  "repositoryUrl": "https://github.com/user/repo",
-  "engineType": "sast",
-  "configId": "default"
+  "engine": "semgrep",
+  "repoUrl": "https://github.com/user/repo",
+  "branch": "main"
 }
 ```
 
-#### 응답 (Response - 202 Accepted)
+- `branch` 생략 시 기본값은 `main`
+
+##### 응답 (Response - 202 Accepted)
 ```json
 {
-  "scanId": "scan_8f42c9d1",
-  "status": "queued",
-  "createdAt": "2026-02-27T12:00:00Z"
+  "scanId": "4b5f0e5e-7a12-4dbe-94db-2cf6f0b01b80",
+  "status": "queued"
 }
 ```
 
-#### 저장소 (In-Memory)
-```typescript
-const scans: Map<string, ScanResultSummary> = new Map();
-// 요청 시 scanId 생성, 상태 'queued' 저장
-```
+- POST 응답에는 `createdAt`이 포함되지 않음
+- `createdAt`은 `GET /api/v1/scans/:id`에서 확인 가능
+
+#### 초기 설계 예시 (역사)
+기존 문서의 `repositoryUrl/engineType/configId`, `createdAt 포함 POST 응답` 예시는 초기 설계안이며, 현재 구현과는 다르다.
 
 ### 검증 기준
 
@@ -136,9 +139,9 @@ const scans: Map<string, ScanResultSummary> = new Map();
 |-----|---------|
 | 엔드포인트 | POST /api/v1/scans 구현 |
 | 응답 코드 | 202 Accepted |
-| 응답 바디 | `{ scanId, status: 'queued', createdAt }` 포함 |
-| scanId 생성 | 고유한 ID 생성 (예: `scan_${uuid}` 또는 `scan_${timestamp}`) |
-| 상태 저장 | in-memory 맵에 scans 상태 저장 |
+| 응답 바디 | `{ scanId, status: 'queued' }` 포함 (`createdAt` 미포함) |
+| scanId 생성 | 고유한 UUID 생성 (`randomUUID`) |
+| 상태 저장 | in-memory `scanStore`에 레코드 저장 (`id`, `engine`, `repoUrl`, `branch`, `status`, `createdAt`, `retryCount`) |
 | 타입체크 | `pnpm --filter @devsecops/api typecheck` 0 errors |
 
 ---
@@ -146,34 +149,42 @@ const scans: Map<string, ScanResultSummary> = new Map();
 ## 목표 5: GET /api/v1/scans/:id → 상태 조회
 
 ### 설명
-`routes/scans.ts`의 GET 엔드포인트를 구현한다. scanId로 저장된 스캔 상태를 조회하고, 존재하면 200, 없으면 404를 반환한다.
+`routes/scans.ts`의 GET 엔드포인트를 구현한다. `:id`로 저장된 스캔 레코드를 조회하고, 존재하면 200, 없으면 404를 반환한다.
 
-#### 응답 예시 (200 OK)
+#### 현재 구현 계약 (Current Contract)
+
+##### 응답 예시 (200 OK)
 ```json
 {
-  "scanId": "scan_8f42c9d1",
+  "id": "4b5f0e5e-7a12-4dbe-94db-2cf6f0b01b80",
+  "engine": "semgrep",
+  "repoUrl": "https://github.com/user/repo",
+  "branch": "main",
   "status": "queued",
-  "engineType": "sast",
-  "repositoryUrl": "https://github.com/user/repo",
-  "createdAt": "2026-02-27T12:00:00Z",
-  "vulnerabilityCount": 0
+  "createdAt": "2026-02-27T12:00:00.000Z",
+  "retryCount": 0
 }
 ```
 
-#### 응답 예시 (404 Not Found)
+- 응답 키는 `scanId`가 아니라 `id`
+- 상태에 따라 `completedAt`, `lastError`가 추가될 수 있음
+
+##### 응답 예시 (404 Not Found)
 ```json
 {
-  "error": "Scan not found",
-  "scanId": "scan_invalid"
+  "error": "스캔을 찾을 수 없습니다"
 }
 ```
+
+#### 초기 설계 예시 (역사)
+기존 문서의 `scanId/engineType/repositoryUrl/vulnerabilityCount` 예시는 초기 설계안이며, 현재 구현과는 다르다.
 
 ### 검증 기준
 
 | 기준 | 체크 항목 |
 |-----|---------|
 | 엔드포인트 | GET /api/v1/scans/:id 구현 |
-| 존재하는 스캔 | 200 응답 + 스캔 상태 반환 |
+| 존재하는 스캔 | 200 응답 + 스캔 레코드 반환(`id`, `engine`, `repoUrl`, `branch`, `status`, `createdAt`, `retryCount`) |
 | 존재하지 않는 스캔 | 404 응답 + 에러 메시지 |
 | 테스트 3개 통과 | ① POST → scanId 생성, ② GET (존재O) → 200, ③ GET (존재X) → 404 |
 | 타입체크 | `pnpm --filter @devsecops/api typecheck` 0 errors |
@@ -277,6 +288,40 @@ const scans: Map<string, ScanResultSummary> = new Map();
 - [ ] dead-letter 재처리(re-drive) API/운영 절차 정의
 - [ ] 워커 중지 시 예약된 retry timer 처리 정책(유지/취소) 명세화
 - [ ] 프로세스 재시작에도 안전한 영속 큐 전환(예: Redis/Broker) 검토
+
+---
+
+## Phase 2-5 완료 항목
+
+> 업데이트: 2026-02-27
+> 목적: dead-letter 재처리 흐름과 운영 제어(API + 테스트)를 완성한 내역 기록
+
+### 완료 체크리스트
+
+- [x] `scanner/queue.ts` 확장
+  - [x] `redriveDeadLetter(scanId)` 구현 및 결과 타입 계약 명확화
+    - `accepted`: dead-letter 제거 + `queued` 전이 + enqueue
+    - `not_found`: dead-letter 미존재
+    - `orphaned_scan`: store 레코드 없음(해당 dead-letter 유지)
+  - [x] redrive 성공 시 `retryCount=0`, `lastError` 제거 정책 적용
+  - [x] 재시도 정책 환경변수화 (`SCAN_RETRY_BACKOFF_BASE_MS`, `SCAN_MAX_RETRIES`)
+  - [x] 환경변수 누락/오입력 시 기본값 유지 (`100ms`, `2회`)
+- [x] scans API 확장
+  - [x] `GET /api/v1/scans/dead-letters` 구현
+  - [x] `POST /api/v1/scans/:id/redrive` 구현
+  - [x] redrive 성공 시 `202 + { scanId, status: 'queued' }` 반환
+  - [x] dead-letter에 없는 항목 redrive 시 `404` 반환
+  - [x] orphan dead-letter redrive 시 `409` 반환
+- [x] 테스트 보강
+  - [x] `apps/api/tests/queue.test.ts`에 redrive 성공/실패 동작 검증 추가
+  - [x] `apps/api/tests/scans.test.ts`에 dead-letter 목록 조회 및 redrive 성공/실패 API 케이스 추가
+  - [x] 기존 테스트 시나리오 회귀 없이 통과
+
+### 남은 TODO
+
+- [ ] 워커 중지 시 예약된 retry timer 처리 정책(유지/취소) 명세화
+- [ ] 프로세스 재시작에도 안전한 영속 큐 전환(예: Redis/Broker) 검토
+- [ ] 실제 외부 스캐너 실행 파이프라인 연결(semgrep/trivy/gitleaks CLI)
 
 ---
 

@@ -2,8 +2,8 @@ import { getScan, updateScanMeta, updateScanStatus } from "./store.js";
 
 const DEFAULT_WORKER_INTERVAL_MS = 250;
 const MOCK_SCAN_DURATION_MS = 30;
-const RETRY_BACKOFF_BASE_MS = 100;
-const MAX_RETRY_COUNT = 2;
+const DEFAULT_RETRY_BACKOFF_BASE_MS = 100;
+const DEFAULT_MAX_RETRY_COUNT = 2;
 
 /** 인메모리 FIFO 스캔 작업 큐 */
 const scanJobQueue: string[] = [];
@@ -16,6 +16,8 @@ interface DeadLetterItem {
   failedAt: string;
 }
 
+export type RedriveDeadLetterResult = "accepted" | "not_found" | "orphaned_scan";
+
 let workerTimer: NodeJS.Timeout | null = null;
 let isProcessing = false;
 const retryTimers = new Set<NodeJS.Timeout>();
@@ -27,6 +29,54 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function readEnvIntWithFallback(
+  key: string,
+  fallback: number,
+  options: { min: number }
+): number {
+  const raw = process.env[key];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < options.min) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function getRetryBackoffBaseMs(): number {
+  return readEnvIntWithFallback(
+    "SCAN_RETRY_BACKOFF_BASE_MS",
+    DEFAULT_RETRY_BACKOFF_BASE_MS,
+    { min: 1 }
+  );
+}
+
+function getMaxRetryCount(): number {
+  return readEnvIntWithFallback("SCAN_MAX_RETRIES", DEFAULT_MAX_RETRY_COUNT, {
+    min: 0,
+  });
+}
+
+function findDeadLetterIndexes(scanId: string): number[] {
+  const indexes: number[] = [];
+  for (let index = 0; index < deadLetterQueue.length; index += 1) {
+    if (deadLetterQueue[index]?.scanId === scanId) {
+      indexes.push(index);
+    }
+  }
+  return indexes;
+}
+
+function removeDeadLetterIndexes(indexes: number[]): void {
+  for (const index of indexes.sort((a, b) => b - a)) {
+    deadLetterQueue.splice(index, 1);
+  }
 }
 
 /**
@@ -55,6 +105,37 @@ export function getDeadLetterSize(): number {
  */
 export function listDeadLetters(): DeadLetterItem[] {
   return [...deadLetterQueue];
+}
+
+/**
+ * dead-letter 항목을 재처리 큐에 다시 올립니다.
+ * - dead-letter가 없으면 `not_found`를 반환합니다.
+ * - dead-letter는 있지만 store에 scan 레코드가 없으면 `orphaned_scan`을 반환하고 dead-letter는 유지합니다.
+ * - 성공 시(`accepted`)에만 dead-letter 제거 + queued 전이 + enqueue를 수행합니다.
+ */
+export function redriveDeadLetter(scanId: string): RedriveDeadLetterResult {
+  const deadLetterIndexes = findDeadLetterIndexes(scanId);
+  if (deadLetterIndexes.length === 0) {
+    return "not_found";
+  }
+
+  if (!getScan(scanId)) {
+    return "orphaned_scan";
+  }
+
+  const updatedMeta = updateScanMeta(scanId, {
+    retryCount: 0,
+    lastError: null,
+  });
+  const updatedStatus = updateScanStatus(scanId, "queued");
+
+  if (!updatedMeta || !updatedStatus) {
+    return "orphaned_scan";
+  }
+
+  removeDeadLetterIndexes(deadLetterIndexes);
+  enqueueScan(scanId);
+  return "accepted";
 }
 
 /**
@@ -132,11 +213,13 @@ export async function processNextScanJob(): Promise<boolean> {
     }
 
     const retryCount = latest.retryCount ?? 0;
+    const maxRetryCount = getMaxRetryCount();
+    const retryBackoffBaseMs = getRetryBackoffBaseMs();
     const errorMessage = error instanceof Error ? error.message : "알 수 없는 오류";
 
-    if (retryCount < MAX_RETRY_COUNT) {
+    if (retryCount < maxRetryCount) {
       const nextRetryCount = retryCount + 1;
-      const backoffMs = RETRY_BACKOFF_BASE_MS * 2 ** (nextRetryCount - 1);
+      const backoffMs = retryBackoffBaseMs * 2 ** (nextRetryCount - 1);
 
       updateScanMeta(scanId, {
         retryCount: nextRetryCount,
