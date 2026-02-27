@@ -253,6 +253,33 @@ const scans: Map<string, ScanResultSummary> = new Map();
 
 ---
 
+## Phase 2-4 완료 항목
+
+> 업데이트: 2026-02-27
+> 목적: in-memory 스캔 큐의 실패 복원력 강화(retry/backoff/dead-letter) 완료 내역 기록
+
+### 완료 체크리스트
+
+- [x] `scanner/queue.ts` 확장: 실패 시 재시도 큐잉 + 지수 백오프(`base * 2^(n-1)`) 적용
+- [x] 최대 재시도 횟수 초과 시 `failed` 전이 + dead-letter 큐 적재
+- [x] dead-letter 조회 함수 추가: `getDeadLetterSize()`, `listDeadLetters()`
+- [x] 테스트 결정성 보장용 훅 추가: `setScanForcedFailuresForTest(scanId, failures)`
+- [x] `scanner/store.ts` 확장: `retryCount`, `lastError` 필드 및 `updateScanMeta()` 보조 함수 추가
+- [x] `apps/api/tests/queue.test.ts` 보강:
+  - [x] 1회 실패 후 재시도 성공 상태 전이 검증
+  - [x] 최대 재시도 초과 시 `failed + dead-letter` 검증
+- [x] 기존 API 계약 유지: POST 202 응답, `scanId/status` 형식 유지
+- [x] 외부 스캐너 실행 미구현 유지: mock 지연 처리만 사용
+
+### 남은 TODO
+
+- [ ] 재시도 정책을 환경 변수화(예: base backoff, max retries)할지 결정
+- [ ] dead-letter 재처리(re-drive) API/운영 절차 정의
+- [ ] 워커 중지 시 예약된 retry timer 처리 정책(유지/취소) 명세화
+- [ ] 프로세스 재시작에도 안전한 영속 큐 전환(예: Redis/Broker) 검토
+
+---
+
 ## 참고 문서
 
 - `DECISIONS.md` — Phase 1 확정 의사결정

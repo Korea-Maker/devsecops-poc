@@ -10,6 +10,8 @@ export interface ScanRecord {
   status: ScanStatus;
   createdAt: string;
   completedAt?: string;
+  retryCount: number;
+  lastError?: string;
 }
 
 /** 인메모리 스캔 저장소 */
@@ -34,6 +36,7 @@ export function createScan(params: CreateScanParams): ScanRecord {
     branch: params.branch,
     status: "queued",
     createdAt: new Date().toISOString(),
+    retryCount: 0,
   };
   scanStore.set(id, record);
   return record;
@@ -81,6 +84,34 @@ export function updateScanStatus(id: string, status: ScanStatus): ScanRecord | u
     next.completedAt = new Date().toISOString();
   } else {
     delete next.completedAt;
+  }
+
+  scanStore.set(id, next);
+  return next;
+}
+
+/** 스캔 실행 메타데이터(재시도/오류)를 업데이트합니다. */
+export function updateScanMeta(
+  id: string,
+  patch: { retryCount?: number; lastError?: string | null }
+): ScanRecord | undefined {
+  const current = scanStore.get(id);
+  if (!current) {
+    return undefined;
+  }
+
+  const next: ScanRecord = {
+    ...current,
+  };
+
+  if (patch.retryCount !== undefined) {
+    next.retryCount = patch.retryCount;
+  }
+
+  if (patch.lastError === null) {
+    delete next.lastError;
+  } else if (patch.lastError !== undefined) {
+    next.lastError = patch.lastError;
   }
 
   scanStore.set(id, next);
