@@ -36,8 +36,13 @@
   - `GET/POST /api/v1/organizations`
   - `GET /api/v1/organizations/:id`
   - `GET/POST /api/v1/organizations/:id/memberships`
-  - `PATCH /api/v1/organizations/:id/memberships/:userId`
+  - `PATCH/DELETE /api/v1/organizations/:id/memberships/:userId`
+  - 마지막 owner 보호 정책(`TENANT_OWNER_MIN_REQUIRED`) 적용
   - `required` 모드에서 tenant scope + admin 권한 가드 적용
+
+- [x] Tenant 감사 로그 조회 API 초안 구현
+  - `GET /api/v1/organizations/:id/audit-logs?limit=50`
+  - 조직 생성/멤버 생성/권한변경/멤버삭제 이벤트 적재
 
 - [x] Tenant 도메인/스토어 보강
   - 파일: `apps/api/src/tenants/store.ts`
@@ -58,9 +63,9 @@
 ## 아직 남은 작업 (Phase 5 후속)
 
 - [ ] 실제 인증 체계 연동 (JWT/OAuth/SSO) 및 헤더 신뢰 경계 정립
-- [ ] 조직/멤버십 API 고도화 (삭제/초대 토큰/페이지네이션/감사로그)
+- [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [ ] DB 영속화 + tenant 인덱싱/행 수준 격리(RLS) 설계
-- [ ] 감사 로그(누가 어떤 tenant 리소스에 접근/재처리했는지)
+- [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화
 
 ---

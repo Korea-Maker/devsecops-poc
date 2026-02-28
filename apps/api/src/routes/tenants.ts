@@ -5,8 +5,13 @@ import {
   getOrganization,
   listMemberships,
   listOrganizations,
+  removeMembership,
   updateMembershipRole,
 } from "../tenants/store.js";
+import {
+  createTenantAuditLog,
+  listTenantAuditLogs,
+} from "../tenants/audit-log.js";
 import {
   getTenantAuthMode,
   requireMinimumRole,
@@ -101,6 +106,23 @@ function ensureTenantScope(
   return false;
 }
 
+function parseAuditLimit(rawLimit: unknown): number | null {
+  if (rawLimit === undefined) {
+    return 50;
+  }
+
+  if (typeof rawLimit !== "string") {
+    return null;
+  }
+
+  const parsed = Number.parseInt(rawLimit, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+    return null;
+  }
+
+  return parsed;
+}
+
 export const tenantRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("onRequest", tenantAuthOnRequest);
 
@@ -168,11 +190,29 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
     const organization = createOrganization({ name, slug });
 
+    createTenantAuditLog({
+      organizationId: organization.id,
+      actorUserId: request.tenantContext.userId,
+      action: "organization.created",
+      details: {
+        name: organization.name,
+        slug: organization.slug,
+      },
+    });
+
     if (getTenantAuthMode() === "required" && request.tenantContext.userId) {
       createMembership({
         organizationId: organization.id,
         userId: request.tenantContext.userId,
         role: "owner",
+      });
+
+      createTenantAuditLog({
+        organizationId: organization.id,
+        actorUserId: request.tenantContext.userId,
+        action: "membership.created",
+        targetUserId: request.tenantContext.userId,
+        details: { role: "owner" },
       });
     }
 
@@ -268,6 +308,16 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       role,
     });
 
+    createTenantAuditLog({
+      organizationId: request.params.id,
+      actorUserId: request.tenantContext.userId,
+      action: "membership.created",
+      targetUserId: membership.userId,
+      details: {
+        role: membership.role,
+      },
+    });
+
     return reply.status(201).send({ membership });
   });
 
@@ -305,6 +355,89 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       role: request.body.role,
     });
 
+    createTenantAuditLog({
+      organizationId: request.params.id,
+      actorUserId: request.tenantContext.userId,
+      action: "membership.role_updated",
+      targetUserId: membership.userId,
+      details: {
+        role: membership.role,
+      },
+    });
+
     return reply.status(200).send({ membership });
+  });
+
+  /** DELETE /api/v1/organizations/:id/memberships/:userId — 조직 멤버 제거 */
+  app.delete<{ Params: { id: string; userId: string } }>(
+    "/api/v1/organizations/:id/memberships/:userId",
+    async (request, reply) => {
+      if (!requireMinimumRole(request, reply, "admin")) {
+        return;
+      }
+
+      if (
+        !ensureTenantScope(
+          reply,
+          request.tenantContext.tenantId,
+          request.params.id
+        )
+      ) {
+        return;
+      }
+
+      const membership = removeMembership({
+        organizationId: request.params.id,
+        userId: request.params.userId,
+      });
+
+      createTenantAuditLog({
+        organizationId: request.params.id,
+        actorUserId: request.tenantContext.userId,
+        action: "membership.deleted",
+        targetUserId: membership.userId,
+        details: {
+          role: membership.role,
+        },
+      });
+
+      return reply.status(200).send({ membership });
+    }
+  );
+
+  /** GET /api/v1/organizations/:id/audit-logs — 조직 감사 로그 조회 */
+  app.get<{
+    Params: { id: string };
+    Querystring: { limit?: string };
+  }>("/api/v1/organizations/:id/audit-logs", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "admin")) {
+      return;
+    }
+
+    if (
+      !ensureTenantScope(
+        reply,
+        request.tenantContext.tenantId,
+        request.params.id
+      )
+    ) {
+      return;
+    }
+
+    const limit = parseAuditLimit(request.query.limit);
+    if (limit === null) {
+      return sendError(
+        reply,
+        400,
+        "limit은 1~100 범위의 정수여야 합니다",
+        "TENANT_INVALID_LIMIT"
+      );
+    }
+
+    const logs = listTenantAuditLogs({
+      organizationId: request.params.id,
+      limit,
+    });
+    return reply.status(200).send(logs);
   });
 };

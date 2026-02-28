@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { clearOrganizationStore } from "../src/tenants/store.js";
+import { clearTenantAuditLogs } from "../src/tenants/audit-log.js";
 import type { UserRole } from "../src/tenants/types.js";
 
 const ORIGINAL_TENANT_AUTH_MODE = process.env.TENANT_AUTH_MODE;
@@ -43,12 +44,14 @@ describe("Tenant API", () => {
 
   beforeEach(() => {
     clearOrganizationStore();
+    clearTenantAuditLogs();
     delete process.env.TENANT_AUTH_MODE;
   });
 
   afterEach(() => {
     restoreEnv("TENANT_AUTH_MODE", ORIGINAL_TENANT_AUTH_MODE);
     clearOrganizationStore();
+    clearTenantAuditLogs();
   });
 
   it("기본 모드(disabled)에서 조직 목록은 default 조직을 포함해야 한다", async () => {
@@ -230,7 +233,180 @@ describe("Tenant API", () => {
     });
   });
 
-  it("required 모드에서 member는 멤버십 관리 API 접근이 거부되어야 한다", async () => {
+  it("required 모드에서 admin은 멤버십 삭제가 가능해야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "tenant-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Membership Delete Org",
+        slug: "membership-delete-org",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/memberships`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "tenant-admin",
+        role: "admin",
+      }),
+      payload: {
+        userId: "member-user-delete",
+        role: "member",
+      },
+    });
+
+    const deleteRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/organizations/${orgId}/memberships/member-user-delete`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "tenant-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(deleteRes.statusCode).toBe(200);
+    expect(deleteRes.json().membership).toMatchObject({
+      organizationId: orgId,
+      userId: "member-user-delete",
+      role: "member",
+    });
+
+    const listRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/memberships`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "tenant-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(listRes.statusCode).toBe(200);
+    expect(listRes.json().some((m: { userId: string }) => m.userId === "member-user-delete")).toBe(false);
+  });
+
+  it("required 모드에서 마지막 owner 삭제는 409(TENANT_OWNER_MIN_REQUIRED)여야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "tenant-admin-owner",
+        role: "admin",
+      }),
+      payload: {
+        name: "Owner Guard Org",
+        slug: "owner-guard-org-route",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    const deleteOwnerRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/organizations/${orgId}/memberships/tenant-admin-owner`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "tenant-admin-owner",
+        role: "admin",
+      }),
+    });
+
+    expect(deleteOwnerRes.statusCode).toBe(409);
+    expect(deleteOwnerRes.json().code).toBe("TENANT_OWNER_MIN_REQUIRED");
+  });
+
+  it("required 모드에서 admin은 감사 로그를 조회할 수 있어야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "audit-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Audit Org",
+        slug: "audit-org",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/memberships`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-admin",
+        role: "admin",
+      }),
+      payload: {
+        userId: "audit-member",
+        role: "member",
+      },
+    });
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/v1/organizations/${orgId}/memberships/audit-member`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-admin",
+        role: "admin",
+      }),
+      payload: {
+        role: "viewer",
+      },
+    });
+
+    const logsRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs?limit=10`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(logsRes.statusCode).toBe(200);
+    const logs = logsRes.json();
+    expect(Array.isArray(logs)).toBe(true);
+    expect(logs.length).toBeGreaterThanOrEqual(3);
+    const actions = logs.map((log: { action: string }) => log.action);
+    expect(actions).toContain("organization.created");
+    expect(actions).toContain("membership.created");
+    expect(actions).toContain("membership.role_updated");
+
+    const invalidLimitRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs?limit=0`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(invalidLimitRes.statusCode).toBe(400);
+    expect(invalidLimitRes.json().code).toBe("TENANT_INVALID_LIMIT");
+  });
+
+  it("required 모드에서 member는 멤버십/감사로그 관리 API 접근이 거부되어야 한다", async () => {
     process.env.TENANT_AUTH_MODE = "required";
 
     const createRes = await app.inject({
@@ -248,17 +424,28 @@ describe("Tenant API", () => {
     });
     const orgId = createRes.json().organization.id as string;
 
+    const memberHeaders = buildTenantHeaders({
+      tenantId: orgId,
+      userId: "tenant-member",
+      role: "member",
+    });
+
     const memberListRes = await app.inject({
       method: "GET",
       url: `/api/v1/organizations/${orgId}/memberships`,
-      headers: buildTenantHeaders({
-        tenantId: orgId,
-        userId: "tenant-member",
-        role: "member",
-      }),
+      headers: memberHeaders,
     });
 
     expect(memberListRes.statusCode).toBe(403);
     expect(memberListRes.json().code).toBe("TENANT_FORBIDDEN");
+
+    const memberAuditRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs`,
+      headers: memberHeaders,
+    });
+
+    expect(memberAuditRes.statusCode).toBe(403);
+    expect(memberAuditRes.json().code).toBe("TENANT_FORBIDDEN");
   });
 });

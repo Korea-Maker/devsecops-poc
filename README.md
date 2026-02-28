@@ -126,6 +126,10 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 - `GET /api/v1/organizations/:id/memberships` → 조직 멤버십 조회 (`admin` 이상)
 - `POST /api/v1/organizations/:id/memberships` → 조직 멤버 추가 (`admin` 이상)
 - `PATCH /api/v1/organizations/:id/memberships/:userId` → 멤버 역할 수정 (`admin` 이상)
+- `DELETE /api/v1/organizations/:id/memberships/:userId` → 조직 멤버 제거 (`admin` 이상)
+  - 마지막 owner 삭제는 `409 TENANT_OWNER_MIN_REQUIRED`
+- `GET /api/v1/organizations/:id/audit-logs?limit=50` → 조직 감사 로그 조회 (`admin` 이상)
+  - `limit`은 1~100 정수
 
 오류 응답 shape는 scans API와 동일하게 `{ error, code? }`를 사용한다.
 

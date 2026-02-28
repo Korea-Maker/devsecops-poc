@@ -230,6 +230,54 @@ export function isOrganizationMember(organizationId: string, userId: string): bo
   return membershipStore.has(membershipKey(organizationId, userId));
 }
 
+function countOwnerMemberships(organizationId: string): number {
+  let ownerCount = 0;
+  for (const membership of membershipStore.values()) {
+    if (membership.organizationId === organizationId && membership.role === "owner") {
+      ownerCount += 1;
+    }
+  }
+  return ownerCount;
+}
+
+/**
+ * 조직 멤버를 제거합니다.
+ * - 마지막 owner 제거는 허용하지 않습니다.
+ */
+export function removeMembership(params: {
+  organizationId: string;
+  userId: string;
+}): OrganizationMembership {
+  const organizationId = normalizeRequiredText(params.organizationId, "organizationId");
+  const userId = normalizeRequiredText(params.userId, "userId");
+
+  assertOrganizationExists(organizationId);
+
+  const key = membershipKey(organizationId, userId);
+  const existingMembership = membershipStore.get(key);
+  if (!existingMembership) {
+    throw createTenantStoreError(
+      404,
+      "조직 멤버십을 찾을 수 없습니다",
+      "TENANT_MEMBERSHIP_NOT_FOUND"
+    );
+  }
+
+  if (
+    existingMembership.role === "owner" &&
+    countOwnerMemberships(organizationId) <= 1
+  ) {
+    throw createTenantStoreError(
+      409,
+      "조직에는 최소 1명의 owner가 필요합니다",
+      "TENANT_OWNER_MIN_REQUIRED"
+    );
+  }
+
+  membershipStore.delete(key);
+  return { ...existingMembership };
+}
+
 /**
  * 조직 멤버의 역할을 수정합니다.
  */
@@ -251,6 +299,18 @@ export function updateMembershipRole(params: {
       404,
       "조직 멤버십을 찾을 수 없습니다",
       "TENANT_MEMBERSHIP_NOT_FOUND"
+    );
+  }
+
+  if (
+    existingMembership.role === "owner" &&
+    role !== "owner" &&
+    countOwnerMemberships(organizationId) <= 1
+  ) {
+    throw createTenantStoreError(
+      409,
+      "조직에는 최소 1명의 owner가 필요합니다",
+      "TENANT_OWNER_MIN_REQUIRED"
     );
   }
 
