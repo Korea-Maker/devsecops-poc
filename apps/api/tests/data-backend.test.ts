@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getActiveDataBackend,
+  getActiveTenantRlsMode,
   getConfiguredDataBackend,
+  getConfiguredTenantRlsMode,
   initializeDataBackend,
   parseDataBackend,
+  parseTenantRlsMode,
   persistOrganizationInviteTokenRecord,
   persistQueueState,
   resetDataBackendForTests,
@@ -13,6 +16,7 @@ const ORIGINAL_DATA_BACKEND = process.env.DATA_BACKEND;
 const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 const ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS =
   process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
+const ORIGINAL_TENANT_RLS_MODE = process.env.TENANT_RLS_MODE;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -57,6 +61,7 @@ function createMockSqlClient(
 
 beforeEach(() => {
   delete process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
+  delete process.env.TENANT_RLS_MODE;
 });
 
 afterEach(async () => {
@@ -66,6 +71,7 @@ afterEach(async () => {
     "TENANT_AUDIT_LOG_RETENTION_DAYS",
     ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS
   );
+  restoreEnv("TENANT_RLS_MODE", ORIGINAL_TENANT_RLS_MODE);
   await resetDataBackendForTests();
 });
 
@@ -82,6 +88,21 @@ describe("data backend config", () => {
     expect(parseDataBackend(" postgres ")).toBe("postgres");
     expect(parseDataBackend("POSTGRES")).toBe("postgres");
     expect(parseDataBackend("memory")).toBe("memory");
+  });
+
+  it("TENANT_RLS_MODE는 off/shadow/enforce를 대소문자/공백 무시하고 파싱해야 한다", () => {
+    expect(parseTenantRlsMode(undefined)).toBe("off");
+    expect(parseTenantRlsMode(" shadow ")).toBe("shadow");
+    expect(parseTenantRlsMode("ENFORCE")).toBe("enforce");
+    expect(parseTenantRlsMode("unknown")).toBe("off");
+  });
+
+  it("TENANT_RLS_MODE 미설정/알 수 없는 값은 off로 fallback 해야 한다", () => {
+    delete process.env.TENANT_RLS_MODE;
+    expect(getConfiguredTenantRlsMode()).toBe("off");
+
+    process.env.TENANT_RLS_MODE = "invalid-mode";
+    expect(getConfiguredTenantRlsMode()).toBe("off");
   });
 
   it("DATA_BACKEND=postgres + DATABASE_URL 누락 시 memory로 안전 fallback 해야 한다", async () => {
@@ -165,12 +186,98 @@ describe("data backend config", () => {
       "003_scan_queue",
       "004_scan_retry_schedule",
       "005_tenant_org_hardening",
+      "006_tenant_rls_preview",
     ]);
 
     const scansTableCreateStatements = mock.query.mock.calls.filter(([sql]) =>
       String(sql).includes("CREATE TABLE IF NOT EXISTS scans")
     );
     expect(scansTableCreateStatements).toHaveLength(1);
+  });
+
+  it("tenant RLS migration은 role/policy idempotency 훅 SQL을 포함해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const mock = createMockSqlClient();
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    const sqlStatements = mock.query.mock.calls.map(([sql]) => String(sql));
+
+    expect(
+      sqlStatements.some(
+        (statement) =>
+          statement.includes("FROM pg_roles") &&
+          statement.includes("app_tenant_runtime")
+      )
+    ).toBe(true);
+
+    expect(
+      sqlStatements.some(
+        (statement) =>
+          statement.includes("FROM pg_policies") &&
+          statement.includes("scans_tenant_isolation")
+      )
+    ).toBe(true);
+  });
+
+  it("TENANT_RLS_MODE=enforce면 초기화 시 RLS enable/force가 적용되어야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_RLS_MODE = "enforce";
+
+    const mock = createMockSqlClient();
+
+    const result = await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    expect(result.activeBackend).toBe("postgres");
+    expect(getActiveTenantRlsMode()).toBe("enforce");
+
+    const normalizedStatements = mock.query.mock.calls.map(([sql]) =>
+      String(sql).replace(/\s+/g, " ").trim()
+    );
+
+    expect(normalizedStatements).toContain("ALTER TABLE scans ENABLE ROW LEVEL SECURITY");
+    expect(normalizedStatements).toContain("ALTER TABLE scans FORCE ROW LEVEL SECURITY");
+  });
+
+  it("TENANT_RLS_MODE=shadow에서는 tenant persistence 전에 session context를 주입해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_RLS_MODE = "shadow";
+
+    const mock = createMockSqlClient();
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    persistOrganizationInviteTokenRecord({
+      token: "shadow-token-1",
+      organizationId: "org-shadow-1",
+      role: "member",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      expiresAt: "2026-03-01T01:00:00.000Z",
+    });
+
+    await resetDataBackendForTests();
+
+    const contextCall = mock.query.mock.calls.find(
+      ([sql, values]) =>
+        String(sql).includes("set_config('app.tenant_id'") &&
+        Array.isArray(values) &&
+        values[0] === "org-shadow-1"
+    );
+
+    expect(contextCall?.[1]).toEqual(["org-shadow-1", "storage-worker", "owner"]);
   });
 
   it("startup 시 running 상태로 멈춘 scan을 queued로 복구하고 queue에 재적재해야 한다", async () => {

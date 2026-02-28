@@ -125,6 +125,18 @@
   - 신규 문서: `docs/architecture/TENANT_RLS_ROLLOUT.md`
   - 포함 내용: 단계별 migration 계획, 정책 SQL 예시, 앱 세션 변수(`set_config`) 전략, 롤백 runbook
 
+- [x] Ops MVP Phase K Tenant RLS opt-in preview 적용
+  - 신규 환경변수: `TENANT_RLS_MODE=off|shadow|enforce` (기본 `off`)
+  - migration `006_tenant_rls_preview` 추가
+    - `app` schema helper 함수 + tenant 대상 테이블 policy 생성
+    - role/policy 생성 시 `pg_roles`/`pg_policies` 기반 idempotency hook 적용
+  - startup 시 모드별 RLS 토글 적용
+    - `enforce`: `ENABLE + FORCE ROW LEVEL SECURITY`
+    - `off|shadow`: `NO FORCE + DISABLE ROW LEVEL SECURITY`
+  - tenant 대상 persistence 작업 전 transaction-local `set_config` 주입(`app.tenant_id`, `app.user_id`, `app.user_role`)
+  - startup/hydration/retention prune는 `service` 컨텍스트로 실행(운영 안전 경로)
+  - README/TENANT_RLS_ROLLOUT/PHASE5_BACKLOG 문서 및 테스트 갱신
+
 ---
 
 ## 아직 남은 작업 (Phase 5 후속)
@@ -140,7 +152,8 @@
 - [x] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
-- [ ] tenant RLS migration/role 분리 실제 적용 (DB enforce 단계)
+- [x] tenant RLS migration/role 분리 opt-in preview 적용 (`TENANT_RLS_MODE`)
+- [ ] full request-path DB direct query 전환 + strict runtime role 분리(후속 hardening)
 - [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
 - [x] staging/prod 배포 워크플로우 초안 구현 (graceful skip + post-deploy smoke contract)
@@ -153,7 +166,7 @@
 - [x] staging/prod 배포 워크플로우 verify/preflight/deploy/smoke 계약 구현
 - [x] staging smoke 이후 optional RLS canary 실행 + enabled/config complete일 때 mismatch fail-fast
 - [x] canary 비활성/구성 누락 시 skip(exit 0) + Step Summary 사유 기록으로 CI 탄력성 보장
-- [ ] PostgreSQL RLS migration/role 분리 실제 enforce 적용
+- [x] PostgreSQL RLS migration/role 분리 opt-in enforce 적용 (`TENANT_RLS_MODE=enforce`, 기본값 `off`)
 
 ---
 

@@ -154,11 +154,17 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
 - 비정상 종료 시 retry timer 대기 작업은 startup recovery에서 즉시 재적재 또는 남은 backoff로 재타이머링
 - `TENANT_AUDIT_LOG_RETENTION_DAYS`가 설정되면 startup 시점에 오래된 tenant audit log를 선제 prune 후 hydrate
+- `TENANT_RLS_MODE`: `off | shadow | enforce` (기본값 `off`)
+  - `off`: 기존 동작 유지 (대상 테이블 RLS DISABLE)
+  - `shadow`: tenant session context 주입만 수행하고 RLS 강제는 비활성
+  - `enforce`: tenant 대상 테이블(`scans`, `organizations`, `organization_memberships`, `organization_invite_tokens`, `tenant_audit_logs`)에 RLS `ENABLE + FORCE` 적용
+  - startup/hydration·retention prune 같은 시스템 경로는 `service` 컨텍스트(`app.tenant_id='*'`)로 안전하게 실행
 
 주요 스캔/테넌트 환경변수:
 
 - `DATA_BACKEND`: `memory | postgres` (기본값 `memory`)
 - `DATABASE_URL`: PostgreSQL 연결 문자열 (`DATA_BACKEND=postgres`일 때 필수)
+- `TENANT_RLS_MODE`: `off | shadow | enforce` (기본값 `off`)
 - `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
 - `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
@@ -268,6 +274,36 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
   - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
 
+### PostgreSQL Tenant RLS enablement / rollback runbook (Ops MVP Phase K)
+
+1. **기본 배포(안전값)**
+   - `DATA_BACKEND=postgres`
+   - `TENANT_RLS_MODE=off` (default)
+2. **Shadow 프리뷰**
+   - `TENANT_RLS_MODE=shadow`로 배포
+   - 앱은 tenant DB session context(`app.tenant_id`, `app.user_id`, `app.user_role`)를 주입하지만, RLS 강제는 하지 않음
+   - staging에서 `infra/scripts/verify-rls-canary.sh` 결과를 확인
+3. **Enforce 전환**
+   - `TENANT_RLS_MODE=enforce`로 배포
+   - 앱 startup 시 대상 tenant 테이블에 `ALTER TABLE ... ENABLE/FORCE ROW LEVEL SECURITY` 적용
+4. **즉시 롤백**
+   - `TENANT_RLS_MODE=off`로 되돌린 뒤 재배포/재시작
+   - 앱 startup 시 대상 테이블에 `NO FORCE + DISABLE ROW LEVEL SECURITY` 적용
+
+권장 점검 SQL:
+
+```sql
+SELECT relname, relrowsecurity, relforcerowsecurity
+FROM pg_class
+WHERE relname IN (
+  'scans',
+  'organizations',
+  'organization_memberships',
+  'organization_invite_tokens',
+  'tenant_audit_logs'
+)
+ORDER BY relname;
+```
 
 **운영/실서비스 MVP complete 판정 조건(현재):**
 - staging/prod 배포 워크플로우가 verify → preflight(skip-safe) → deploy → smoke 계약으로 동작
@@ -347,7 +383,7 @@ pnpm --filter @devsecops/web build
 - **감사 로그 보존정책 기본값 비활성화**: 하위호환을 위해 `TENANT_AUDIT_LOG_RETENTION_DAYS`를 설정하지 않으면 감사 로그는 자동 삭제되지 않음
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
-- **DB RLS enforce 미적용(설계+canary 준비)**: 현재 tenant 격리는 앱 레벨 필터가 중심이며, staging read-only canary(`infra/scripts/verify-rls-canary.sh`)로 격리 회귀를 점검할 수 있지만 PostgreSQL RLS migration/role 분리 적용은 후속 진행 예정
+- **Tenant RLS는 opt-in preview 단계**: 기본값은 `TENANT_RLS_MODE=off`이며, `enforce`는 tenant 대상 영속화 테이블에 적용된다. queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지되고, startup/hydration·retention prune 경로는 `service` 컨텍스트로 동작한다.
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체

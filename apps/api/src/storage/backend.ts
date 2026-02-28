@@ -10,6 +10,7 @@ const DEFAULT_ORGANIZATION_SLUG = "default";
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export type DataBackend = "memory" | "postgres";
+export type TenantRlsMode = "off" | "shadow" | "enforce";
 
 export type DataBackendInitFallbackReason =
   | "missing_database_url"
@@ -70,6 +71,28 @@ interface InitializeDataBackendOptions {
   createSqlClient?: CreateSqlClient;
   logger?: DataBackendLogger;
 }
+
+type TenantRlsActorRole = OrganizationMembership["role"] | "service";
+
+interface TenantRlsSessionContext {
+  tenantId: string;
+  userId: string;
+  userRole: TenantRlsActorRole;
+}
+
+const SYSTEM_TENANT_RLS_CONTEXT: TenantRlsSessionContext = {
+  tenantId: "*",
+  userId: "system",
+  userRole: "service",
+};
+
+const TENANT_RLS_TARGET_TABLES = [
+  "scans",
+  "organizations",
+  "organization_memberships",
+  "organization_invite_tokens",
+  "tenant_audit_logs",
+] as const;
 
 interface ScanRow extends QueryResultRow {
   id: string;
@@ -145,6 +168,7 @@ interface ScanRetryScheduleRow extends QueryResultRow {
 }
 
 let activeBackend: DataBackend = "memory";
+let activeTenantRlsMode: TenantRlsMode = "off";
 let sqlClient: SqlClient | null = null;
 let initPromise: Promise<DataBackendInitResult> | null = null;
 let persistenceTaskQueue: Promise<void> = Promise.resolve();
@@ -215,8 +239,75 @@ export function getActiveDataBackend(): DataBackend {
   return activeBackend;
 }
 
+function normalizeTenantRlsMode(rawValue: string | undefined): TenantRlsMode {
+  if (!rawValue) {
+    return "off";
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (normalized === "shadow") {
+    return "shadow";
+  }
+
+  if (normalized === "enforce") {
+    return "enforce";
+  }
+
+  return "off";
+}
+
+export function parseTenantRlsMode(rawValue: string | undefined): TenantRlsMode {
+  return normalizeTenantRlsMode(rawValue);
+}
+
+export function getConfiguredTenantRlsMode(): TenantRlsMode {
+  return normalizeTenantRlsMode(readTrimmedEnv("TENANT_RLS_MODE"));
+}
+
+export function getActiveTenantRlsMode(): TenantRlsMode {
+  return activeTenantRlsMode;
+}
+
 export function getDatabaseUrl(): string | undefined {
   return readTrimmedEnv("DATABASE_URL");
+}
+
+function isTenantRlsContextEnabled(mode: TenantRlsMode = activeTenantRlsMode): boolean {
+  return mode !== "off";
+}
+
+function normalizeTenantRlsSessionContext(
+  context: Partial<TenantRlsSessionContext> | undefined
+): TenantRlsSessionContext {
+  const normalizedTenantId = context?.tenantId?.trim();
+  const tenantId =
+    normalizedTenantId && normalizedTenantId.length > 0
+      ? normalizedTenantId
+      : SYSTEM_TENANT_RLS_CONTEXT.tenantId;
+
+  const normalizedUserId = context?.userId?.trim();
+  const userId =
+    normalizedUserId && normalizedUserId.length > 0
+      ? normalizedUserId
+      : SYSTEM_TENANT_RLS_CONTEXT.userId;
+
+  const userRole = context?.userRole ?? SYSTEM_TENANT_RLS_CONTEXT.userRole;
+
+  return {
+    tenantId,
+    userId,
+    userRole,
+  };
+}
+
+function createTenantRlsContextForTenant(tenantId: string): TenantRlsSessionContext {
+  const normalizedTenantId = tenantId.trim();
+
+  return normalizeTenantRlsSessionContext({
+    tenantId: normalizedTenantId.length > 0 ? normalizedTenantId : DEFAULT_TENANT_ID,
+    userId: "storage-worker",
+    userRole: "owner",
+  });
 }
 
 function readAuditLogRetentionDays(): number | undefined {
@@ -440,6 +531,196 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       );
     },
   },
+  {
+    version: "006_tenant_rls_preview",
+    apply: async (client) => {
+      await client.query("CREATE SCHEMA IF NOT EXISTS app");
+
+      await client.query(`
+        CREATE OR REPLACE FUNCTION app.tenant_id()
+        RETURNS text
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT COALESCE(
+            NULLIF(current_setting('app.tenant_id', true), ''),
+            NULLIF(current_setting('app.current_tenant_id', true), '')
+          );
+        $$
+      `);
+
+      await client.query(`
+        CREATE OR REPLACE FUNCTION app.user_id()
+        RETURNS text
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT COALESCE(
+            NULLIF(current_setting('app.user_id', true), ''),
+            NULLIF(current_setting('app.current_user_id', true), '')
+          );
+        $$
+      `);
+
+      await client.query(`
+        CREATE OR REPLACE FUNCTION app.user_role()
+        RETURNS text
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT COALESCE(
+            NULLIF(current_setting('app.user_role', true), ''),
+            NULLIF(current_setting('app.current_user_role', true), '')
+          );
+        $$
+      `);
+
+      await client.query(`
+        CREATE OR REPLACE FUNCTION app.is_service_context()
+        RETURNS boolean
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT app.user_role() = 'service' OR app.tenant_id() = '*';
+        $$
+      `);
+
+      await client.query(`
+        CREATE OR REPLACE FUNCTION app.role_at_least(required_role text)
+        RETURNS boolean
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT COALESCE(
+            array_position(ARRAY['viewer', 'member', 'admin', 'owner', 'service'], app.user_role())
+              >= array_position(ARRAY['viewer', 'member', 'admin', 'owner', 'service'], required_role),
+            false
+          )
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_tenant_runtime') THEN
+            CREATE ROLE app_tenant_runtime NOLOGIN;
+          END IF;
+        EXCEPTION
+          WHEN insufficient_privilege THEN
+            RAISE NOTICE 'skip creating role app_tenant_runtime (insufficient privilege)';
+        END
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_tenant_migration') THEN
+            CREATE ROLE app_tenant_migration NOLOGIN;
+          END IF;
+        EXCEPTION
+          WHEN insufficient_privilege THEN
+            RAISE NOTICE 'skip creating role app_tenant_migration (insufficient privilege)';
+        END
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = current_schema()
+              AND tablename = 'scans'
+              AND policyname = 'scans_tenant_isolation'
+          ) THEN
+            CREATE POLICY scans_tenant_isolation
+              ON scans
+              USING (app.is_service_context() OR tenant_id = app.tenant_id())
+              WITH CHECK (app.is_service_context() OR tenant_id = app.tenant_id());
+          END IF;
+        END
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = current_schema()
+              AND tablename = 'organizations'
+              AND policyname = 'organizations_tenant_isolation'
+          ) THEN
+            CREATE POLICY organizations_tenant_isolation
+              ON organizations
+              USING (app.is_service_context() OR id = app.tenant_id())
+              WITH CHECK (app.is_service_context() OR id = app.tenant_id());
+          END IF;
+        END
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = current_schema()
+              AND tablename = 'organization_memberships'
+              AND policyname = 'organization_memberships_tenant_isolation'
+          ) THEN
+            CREATE POLICY organization_memberships_tenant_isolation
+              ON organization_memberships
+              USING (app.is_service_context() OR organization_id = app.tenant_id())
+              WITH CHECK (app.is_service_context() OR organization_id = app.tenant_id());
+          END IF;
+        END
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = current_schema()
+              AND tablename = 'organization_invite_tokens'
+              AND policyname = 'organization_invite_tokens_tenant_isolation'
+          ) THEN
+            CREATE POLICY organization_invite_tokens_tenant_isolation
+              ON organization_invite_tokens
+              USING (app.is_service_context() OR organization_id = app.tenant_id())
+              WITH CHECK (app.is_service_context() OR organization_id = app.tenant_id());
+          END IF;
+        END
+        $$
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = current_schema()
+              AND tablename = 'tenant_audit_logs'
+              AND policyname = 'tenant_audit_logs_tenant_isolation'
+          ) THEN
+            CREATE POLICY tenant_audit_logs_tenant_isolation
+              ON tenant_audit_logs
+              USING (app.is_service_context() OR organization_id = app.tenant_id())
+              WITH CHECK (app.is_service_context() OR organization_id = app.tenant_id());
+          END IF;
+        END
+        $$
+      `);
+    },
+  },
 ];
 
 async function ensureSchemaMigrationsTable(client: SqlClient): Promise<void> {
@@ -488,6 +769,40 @@ async function applySchemaMigrations(client: SqlClient): Promise<void> {
     await markMigrationApplied(client, migration.version);
     appliedVersions.add(migration.version);
   }
+}
+
+async function applyTenantRlsMode(
+  client: SqlClient,
+  mode: TenantRlsMode
+): Promise<void> {
+  for (const tableName of TENANT_RLS_TARGET_TABLES) {
+    if (mode === "enforce") {
+      await client.query(`ALTER TABLE ${tableName} ENABLE ROW LEVEL SECURITY`);
+      await client.query(`ALTER TABLE ${tableName} FORCE ROW LEVEL SECURITY`);
+      continue;
+    }
+
+    await client.query(`ALTER TABLE ${tableName} NO FORCE ROW LEVEL SECURITY`);
+    await client.query(`ALTER TABLE ${tableName} DISABLE ROW LEVEL SECURITY`);
+  }
+}
+
+async function applyTenantRlsSessionContext(
+  client: SqlClient,
+  context: TenantRlsSessionContext
+): Promise<void> {
+  await client.query(
+    `
+      SELECT
+        set_config('app.tenant_id', $1, true),
+        set_config('app.user_id', $2, true),
+        set_config('app.user_role', $3, true),
+        set_config('app.current_tenant_id', $1, true),
+        set_config('app.current_user_id', $2, true),
+        set_config('app.current_user_role', $3, true)
+    `,
+    [context.tenantId, context.userId, context.userRole]
+  );
 }
 
 async function recoverInterruptedRunningScans(client: SqlClient): Promise<number> {
@@ -819,7 +1134,9 @@ export async function initializeDataBackend(
 
   initPromise = (async (): Promise<DataBackendInitResult> => {
     const configuredBackend = getConfiguredDataBackend();
+    const configuredTenantRlsMode = getConfiguredTenantRlsMode();
     activeBackend = "memory";
+    activeTenantRlsMode = "off";
 
     if (configuredBackend !== "postgres") {
       return {
@@ -846,17 +1163,35 @@ export async function initializeDataBackend(
     let candidateClient: SqlClient | null = null;
 
     try {
-      candidateClient = createSqlClient(databaseUrl);
-      await applySchemaMigrations(candidateClient);
-      await prunePersistedTenantAuditLogsOnStartup(candidateClient);
-      const recoveredRunningScans = await recoverInterruptedRunningScans(candidateClient);
-      const persistedState = await readPersistedState(candidateClient);
+      const postgresClient = createSqlClient(databaseUrl);
+      candidateClient = postgresClient;
 
-      sqlClient = candidateClient;
+      await applySchemaMigrations(postgresClient);
+      await applyTenantRlsMode(postgresClient, configuredTenantRlsMode);
+
+      const { recoveredRunningScans, persistedState } = await runWithTenantRlsContext(
+        postgresClient,
+        "initializeDataBackend",
+        SYSTEM_TENANT_RLS_CONTEXT,
+        async () => {
+          await prunePersistedTenantAuditLogsOnStartup(postgresClient);
+          const recoveredRunningScans = await recoverInterruptedRunningScans(postgresClient);
+          const persistedState = await readPersistedState(postgresClient);
+
+          return {
+            recoveredRunningScans,
+            persistedState,
+          };
+        },
+        configuredTenantRlsMode
+      );
+
+      sqlClient = postgresClient;
       candidateClient = null;
       activeBackend = "postgres";
+      activeTenantRlsMode = configuredTenantRlsMode;
       info(
-        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, invites=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, retrySchedules=%d, recoveredRunning=%d)",
+        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, invites=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, retrySchedules=%d, recoveredRunning=%d, tenantRlsMode=%s)",
         persistedState.scans.length,
         persistedState.organizations.length,
         persistedState.memberships.length,
@@ -865,7 +1200,8 @@ export async function initializeDataBackend(
         persistedState.queue.queuedScanIds.length,
         persistedState.queue.deadLetters.length,
         persistedState.queue.pendingRetries.length,
-        recoveredRunningScans
+        recoveredRunningScans,
+        activeTenantRlsMode
       );
 
       return {
@@ -879,6 +1215,7 @@ export async function initializeDataBackend(
         toErrorMessage(initError)
       );
       activeBackend = "memory";
+      activeTenantRlsMode = "off";
 
       if (candidateClient) {
         try {
@@ -930,16 +1267,17 @@ function schedulePersistenceTask(
     });
 }
 
-async function runInTransaction(
+async function runInTransaction<T>(
   client: SqlClient,
   transactionName: string,
-  task: () => Promise<void>
-): Promise<void> {
+  task: () => Promise<T>
+): Promise<T> {
   await client.query("BEGIN");
 
   try {
-    await task();
+    const result = await task();
     await client.query("COMMIT");
+    return result;
   } catch (transactionError) {
     try {
       await client.query("ROLLBACK");
@@ -955,73 +1293,108 @@ async function runInTransaction(
   }
 }
 
+async function runWithTenantRlsContext<T>(
+  client: SqlClient,
+  transactionName: string,
+  context: Partial<TenantRlsSessionContext> | undefined,
+  task: () => Promise<T>,
+  mode: TenantRlsMode = activeTenantRlsMode
+): Promise<T> {
+  if (!isTenantRlsContextEnabled(mode)) {
+    return task();
+  }
+
+  const normalizedContext = normalizeTenantRlsSessionContext(context);
+
+  return runInTransaction(client, `tenantRls:${transactionName}`, async () => {
+    await applyTenantRlsSessionContext(client, normalizedContext);
+    return task();
+  });
+}
+
 export function persistScanRecord(record: ScanRecord): void {
+  const tenantRlsContext = createTenantRlsContextForTenant(record.tenantId);
+
   schedulePersistenceTask("persistScanRecord", async (client) => {
-    await client.query(
-      `
-        INSERT INTO scans (
-          id,
-          tenant_id,
-          engine,
-          repo_url,
-          branch,
-          status,
-          created_at,
-          completed_at,
-          retry_count,
-          last_error,
-          last_error_code,
-          findings
-        )
-        VALUES (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8,
-          $9,
-          $10,
-          $11,
-          $12::jsonb
-        )
-        ON CONFLICT (id)
-        DO UPDATE SET
-          tenant_id = EXCLUDED.tenant_id,
-          engine = EXCLUDED.engine,
-          repo_url = EXCLUDED.repo_url,
-          branch = EXCLUDED.branch,
-          status = EXCLUDED.status,
-          created_at = EXCLUDED.created_at,
-          completed_at = EXCLUDED.completed_at,
-          retry_count = EXCLUDED.retry_count,
-          last_error = EXCLUDED.last_error,
-          last_error_code = EXCLUDED.last_error_code,
-          findings = EXCLUDED.findings
-      `,
-      [
-        record.id,
-        record.tenantId,
-        record.engine,
-        record.repoUrl,
-        record.branch,
-        record.status,
-        record.createdAt,
-        record.completedAt ?? null,
-        record.retryCount,
-        record.lastError ?? null,
-        record.lastErrorCode ?? null,
-        record.findings ? JSON.stringify(record.findings) : null,
-      ]
+    await runWithTenantRlsContext(
+      client,
+      "persistScanRecord",
+      tenantRlsContext,
+      async () => {
+        await client.query(
+          `
+            INSERT INTO scans (
+              id,
+              tenant_id,
+              engine,
+              repo_url,
+              branch,
+              status,
+              created_at,
+              completed_at,
+              retry_count,
+              last_error,
+              last_error_code,
+              findings
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10,
+              $11,
+              $12::jsonb
+            )
+            ON CONFLICT (id)
+            DO UPDATE SET
+              tenant_id = EXCLUDED.tenant_id,
+              engine = EXCLUDED.engine,
+              repo_url = EXCLUDED.repo_url,
+              branch = EXCLUDED.branch,
+              status = EXCLUDED.status,
+              created_at = EXCLUDED.created_at,
+              completed_at = EXCLUDED.completed_at,
+              retry_count = EXCLUDED.retry_count,
+              last_error = EXCLUDED.last_error,
+              last_error_code = EXCLUDED.last_error_code,
+              findings = EXCLUDED.findings
+          `,
+          [
+            record.id,
+            record.tenantId,
+            record.engine,
+            record.repoUrl,
+            record.branch,
+            record.status,
+            record.createdAt,
+            record.completedAt ?? null,
+            record.retryCount,
+            record.lastError ?? null,
+            record.lastErrorCode ?? null,
+            record.findings ? JSON.stringify(record.findings) : null,
+          ]
+        );
+      }
     );
   });
 }
 
 export function clearPersistedScans(): void {
   schedulePersistenceTask("clearPersistedScans", async (client) => {
-    await client.query("DELETE FROM scans");
+    await runWithTenantRlsContext(
+      client,
+      "clearPersistedScans",
+      SYSTEM_TENANT_RLS_CONTEXT,
+      async () => {
+        await client.query("DELETE FROM scans");
+      }
+    );
   });
 }
 
@@ -1080,56 +1453,74 @@ export function clearPersistedQueueState(): void {
 }
 
 export function persistOrganizationRecord(organization: Organization): void {
+  const tenantRlsContext = createTenantRlsContextForTenant(organization.id);
+
   schedulePersistenceTask("persistOrganizationRecord", async (client) => {
-    await client.query(
-      `
-        INSERT INTO organizations (id, name, slug, active, created_at, disabled_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (id)
-        DO UPDATE SET
-          name = EXCLUDED.name,
-          slug = EXCLUDED.slug,
-          active = EXCLUDED.active,
-          created_at = EXCLUDED.created_at,
-          disabled_at = EXCLUDED.disabled_at
-      `,
-      [
-        organization.id,
-        organization.name,
-        organization.slug,
-        organization.active,
-        organization.createdAt,
-        organization.disabledAt ?? null,
-      ]
+    await runWithTenantRlsContext(
+      client,
+      "persistOrganizationRecord",
+      tenantRlsContext,
+      async () => {
+        await client.query(
+          `
+            INSERT INTO organizations (id, name, slug, active, created_at, disabled_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (id)
+            DO UPDATE SET
+              name = EXCLUDED.name,
+              slug = EXCLUDED.slug,
+              active = EXCLUDED.active,
+              created_at = EXCLUDED.created_at,
+              disabled_at = EXCLUDED.disabled_at
+          `,
+          [
+            organization.id,
+            organization.name,
+            organization.slug,
+            organization.active,
+            organization.createdAt,
+            organization.disabledAt ?? null,
+          ]
+        );
+      }
     );
   });
 }
 
 export function persistMembershipRecord(membership: OrganizationMembership): void {
+  const tenantRlsContext = createTenantRlsContextForTenant(membership.organizationId);
+
   schedulePersistenceTask("persistMembershipRecord", async (client) => {
-    await client.query(
-      `
-        INSERT INTO organization_memberships (
-          organization_id,
-          user_id,
-          role,
-          created_at,
-          updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (organization_id, user_id)
-        DO UPDATE SET
-          role = EXCLUDED.role,
-          created_at = EXCLUDED.created_at,
-          updated_at = EXCLUDED.updated_at
-      `,
-      [
-        membership.organizationId,
-        membership.userId,
-        membership.role,
-        membership.createdAt,
-        membership.updatedAt,
-      ]
+    await runWithTenantRlsContext(
+      client,
+      "persistMembershipRecord",
+      tenantRlsContext,
+      async () => {
+        await client.query(
+          `
+            INSERT INTO organization_memberships (
+              organization_id,
+              user_id,
+              role,
+              created_at,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (organization_id, user_id)
+            DO UPDATE SET
+              role = EXCLUDED.role,
+              created_at = EXCLUDED.created_at,
+              updated_at = EXCLUDED.updated_at
+          `,
+          [
+            membership.organizationId,
+            membership.userId,
+            membership.role,
+            membership.createdAt,
+            membership.updatedAt,
+          ]
+        );
+      }
     );
   });
 }
@@ -1137,43 +1528,52 @@ export function persistMembershipRecord(membership: OrganizationMembership): voi
 export function persistOrganizationInviteTokenRecord(
   inviteToken: OrganizationInviteToken
 ): void {
+  const tenantRlsContext = createTenantRlsContextForTenant(inviteToken.organizationId);
+
   schedulePersistenceTask("persistOrganizationInviteTokenRecord", async (client) => {
-    await client.query(
-      `
-        INSERT INTO organization_invite_tokens (
-          token,
-          organization_id,
-          role,
-          email,
-          created_by_user_id,
-          created_at,
-          expires_at,
-          consumed_at,
-          consumed_by_user_id
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (token)
-        DO UPDATE SET
-          organization_id = EXCLUDED.organization_id,
-          role = EXCLUDED.role,
-          email = EXCLUDED.email,
-          created_by_user_id = EXCLUDED.created_by_user_id,
-          created_at = EXCLUDED.created_at,
-          expires_at = EXCLUDED.expires_at,
-          consumed_at = EXCLUDED.consumed_at,
-          consumed_by_user_id = EXCLUDED.consumed_by_user_id
-      `,
-      [
-        inviteToken.token,
-        inviteToken.organizationId,
-        inviteToken.role,
-        inviteToken.email ?? null,
-        inviteToken.createdByUserId ?? null,
-        inviteToken.createdAt,
-        inviteToken.expiresAt,
-        inviteToken.consumedAt ?? null,
-        inviteToken.consumedByUserId ?? null,
-      ]
+    await runWithTenantRlsContext(
+      client,
+      "persistOrganizationInviteTokenRecord",
+      tenantRlsContext,
+      async () => {
+        await client.query(
+          `
+            INSERT INTO organization_invite_tokens (
+              token,
+              organization_id,
+              role,
+              email,
+              created_by_user_id,
+              created_at,
+              expires_at,
+              consumed_at,
+              consumed_by_user_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (token)
+            DO UPDATE SET
+              organization_id = EXCLUDED.organization_id,
+              role = EXCLUDED.role,
+              email = EXCLUDED.email,
+              created_by_user_id = EXCLUDED.created_by_user_id,
+              created_at = EXCLUDED.created_at,
+              expires_at = EXCLUDED.expires_at,
+              consumed_at = EXCLUDED.consumed_at,
+              consumed_by_user_id = EXCLUDED.consumed_by_user_id
+          `,
+          [
+            inviteToken.token,
+            inviteToken.organizationId,
+            inviteToken.role,
+            inviteToken.email ?? null,
+            inviteToken.createdByUserId ?? null,
+            inviteToken.createdAt,
+            inviteToken.expiresAt,
+            inviteToken.consumedAt ?? null,
+            inviteToken.consumedByUserId ?? null,
+          ]
+        );
+      }
     );
   });
 }
@@ -1182,13 +1582,22 @@ export function deletePersistedMembership(
   organizationId: string,
   userId: string
 ): void {
+  const tenantRlsContext = createTenantRlsContextForTenant(organizationId);
+
   schedulePersistenceTask("deletePersistedMembership", async (client) => {
-    await client.query(
-      `
-        DELETE FROM organization_memberships
-        WHERE organization_id = $1 AND user_id = $2
-      `,
-      [organizationId, userId]
+    await runWithTenantRlsContext(
+      client,
+      "deletePersistedMembership",
+      tenantRlsContext,
+      async () => {
+        await client.query(
+          `
+            DELETE FROM organization_memberships
+            WHERE organization_id = $1 AND user_id = $2
+          `,
+          [organizationId, userId]
+        );
+      }
     );
   });
 }
@@ -1197,60 +1606,76 @@ export function clearPersistedOrganizationsAndMemberships(): void {
   schedulePersistenceTask(
     "clearPersistedOrganizationsAndMemberships",
     async (client) => {
-      await client.query("DELETE FROM organization_invite_tokens");
-      await client.query("DELETE FROM organization_memberships");
-      await client.query("DELETE FROM organizations");
-      await client.query(
-        `
-          INSERT INTO organizations (id, name, slug, active, created_at, disabled_at)
-          VALUES ($1, $2, $3, $4, $5, $6)
-          ON CONFLICT DO NOTHING
-        `,
-        [
-          DEFAULT_TENANT_ID,
-          DEFAULT_ORGANIZATION_NAME,
-          DEFAULT_ORGANIZATION_SLUG,
-          true,
-          new Date().toISOString(),
-          null,
-        ]
+      await runWithTenantRlsContext(
+        client,
+        "clearPersistedOrganizationsAndMemberships",
+        SYSTEM_TENANT_RLS_CONTEXT,
+        async () => {
+          await client.query("DELETE FROM organization_invite_tokens");
+          await client.query("DELETE FROM organization_memberships");
+          await client.query("DELETE FROM organizations");
+          await client.query(
+            `
+              INSERT INTO organizations (id, name, slug, active, created_at, disabled_at)
+              VALUES ($1, $2, $3, $4, $5, $6)
+              ON CONFLICT DO NOTHING
+            `,
+            [
+              DEFAULT_TENANT_ID,
+              DEFAULT_ORGANIZATION_NAME,
+              DEFAULT_ORGANIZATION_SLUG,
+              true,
+              new Date().toISOString(),
+              null,
+            ]
+          );
+        }
       );
     }
   );
 }
 
 export function persistTenantAuditLog(log: TenantAuditLog): void {
+  const tenantRlsContext = createTenantRlsContextForTenant(log.organizationId);
+
   schedulePersistenceTask("persistTenantAuditLog", async (client) => {
-    await client.query(
-      `
-        INSERT INTO tenant_audit_logs (
-          id,
-          organization_id,
-          actor_user_id,
-          action,
-          target_user_id,
-          details,
-          created_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-        ON CONFLICT (id)
-        DO UPDATE SET
-          organization_id = EXCLUDED.organization_id,
-          actor_user_id = EXCLUDED.actor_user_id,
-          action = EXCLUDED.action,
-          target_user_id = EXCLUDED.target_user_id,
-          details = EXCLUDED.details,
-          created_at = EXCLUDED.created_at
-      `,
-      [
-        log.id,
-        log.organizationId,
-        log.actorUserId ?? null,
-        log.action,
-        log.targetUserId ?? null,
-        log.details ? JSON.stringify(log.details) : null,
-        log.createdAt,
-      ]
+    await runWithTenantRlsContext(
+      client,
+      "persistTenantAuditLog",
+      tenantRlsContext,
+      async () => {
+        await client.query(
+          `
+            INSERT INTO tenant_audit_logs (
+              id,
+              organization_id,
+              actor_user_id,
+              action,
+              target_user_id,
+              details,
+              created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+            ON CONFLICT (id)
+            DO UPDATE SET
+              organization_id = EXCLUDED.organization_id,
+              actor_user_id = EXCLUDED.actor_user_id,
+              action = EXCLUDED.action,
+              target_user_id = EXCLUDED.target_user_id,
+              details = EXCLUDED.details,
+              created_at = EXCLUDED.created_at
+          `,
+          [
+            log.id,
+            log.organizationId,
+            log.actorUserId ?? null,
+            log.action,
+            log.targetUserId ?? null,
+            log.details ? JSON.stringify(log.details) : null,
+            log.createdAt,
+          ]
+        );
+      }
     );
   });
 }
@@ -1264,19 +1689,33 @@ export function prunePersistedTenantAuditLogs(cutoffIso: string): void {
   const normalizedCutoffIso = new Date(cutoffMs).toISOString();
 
   schedulePersistenceTask("prunePersistedTenantAuditLogs", async (client) => {
-    await client.query(
-      `
-        DELETE FROM tenant_audit_logs
-        WHERE created_at < $1
-      `,
-      [normalizedCutoffIso]
+    await runWithTenantRlsContext(
+      client,
+      "prunePersistedTenantAuditLogs",
+      SYSTEM_TENANT_RLS_CONTEXT,
+      async () => {
+        await client.query(
+          `
+            DELETE FROM tenant_audit_logs
+            WHERE created_at < $1
+          `,
+          [normalizedCutoffIso]
+        );
+      }
     );
   });
 }
 
 export function clearPersistedTenantAuditLogs(): void {
   schedulePersistenceTask("clearPersistedTenantAuditLogs", async (client) => {
-    await client.query("DELETE FROM tenant_audit_logs");
+    await runWithTenantRlsContext(
+      client,
+      "clearPersistedTenantAuditLogs",
+      SYSTEM_TENANT_RLS_CONTEXT,
+      async () => {
+        await client.query("DELETE FROM tenant_audit_logs");
+      }
+    );
   });
 }
 
@@ -1290,6 +1729,7 @@ export async function shutdownDataBackend(): Promise<void> {
   await closeSqlClient();
 
   activeBackend = "memory";
+  activeTenantRlsMode = "off";
   initPromise = null;
   persistenceTaskQueue = Promise.resolve();
 }

@@ -40,14 +40,17 @@
 
 RLS 정책은 아래 세션 변수를 기준으로 동작한다.
 
-- `app.current_tenant_id`
-- `app.current_user_id`
-- `app.current_user_role` (`owner|admin|member|viewer`)
+- `app.tenant_id` (legacy 호환 alias: `app.current_tenant_id`)
+- `app.user_id` (legacy 호환 alias: `app.current_user_id`)
+- `app.user_role` (legacy 호환 alias: `app.current_user_role`)
 
-요청 처리 시 DB 트랜잭션 시작 후 `SET LOCAL` 성격으로 주입한다.
+요청/작업 처리 시 DB 트랜잭션 시작 후 `SET LOCAL` 성격으로 주입한다.
 
 ```sql
 SELECT
+  set_config('app.tenant_id', $1, true),
+  set_config('app.user_id', $2, true),
+  set_config('app.user_role', $3, true),
   set_config('app.current_tenant_id', $1, true),
   set_config('app.current_user_id', $2, true),
   set_config('app.current_user_role', $3, true);
@@ -67,125 +70,75 @@ SELECT
 
 ---
 
-## 5) 정책 헬퍼 함수 예시
+## 5) 정책 헬퍼 함수 (현재 구현)
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS app;
 
-CREATE OR REPLACE FUNCTION app.current_tenant_id()
+CREATE OR REPLACE FUNCTION app.tenant_id()
 RETURNS text
-LANGUAGE sql
-STABLE
-AS $$
-  SELECT NULLIF(current_setting('app.current_tenant_id', true), '');
-$$;
-
-CREATE OR REPLACE FUNCTION app.current_user_role()
-RETURNS text
-LANGUAGE sql
-STABLE
-AS $$
-  SELECT NULLIF(current_setting('app.current_user_role', true), '');
-$$;
-
-CREATE OR REPLACE FUNCTION app.role_at_least(required_role text)
-RETURNS boolean
 LANGUAGE sql
 STABLE
 AS $$
   SELECT COALESCE(
-    array_position(ARRAY['viewer', 'member', 'admin', 'owner'], app.current_user_role())
-      >= array_position(ARRAY['viewer', 'member', 'admin', 'owner'], required_role),
-    false
+    NULLIF(current_setting('app.tenant_id', true), ''),
+    NULLIF(current_setting('app.current_tenant_id', true), '')
   );
+$$;
+
+CREATE OR REPLACE FUNCTION app.user_role()
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE(
+    NULLIF(current_setting('app.user_role', true), ''),
+    NULLIF(current_setting('app.current_user_role', true), '')
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION app.is_service_context()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT app.user_role() = 'service' OR app.tenant_id() = '*';
 $$;
 ```
 
+`service` 컨텍스트는 startup/hydration/retention prune 같은 시스템 경로에서만 사용한다.
+
 ---
 
-## 6) RLS 정책 예시
+## 6) RLS 정책 예시 (preview 구현)
 
-> 아래 SQL은 rollout migration에 포함될 정책 예시다.
-
-### `scans`
+> 실제 migration(`006_tenant_rls_preview`)은 tenant 대상 테이블별로 `<table>_tenant_isolation` 정책을 생성한다.
 
 ```sql
-ALTER TABLE scans ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY scans_tenant_select
+CREATE POLICY scans_tenant_isolation
   ON scans
-  FOR SELECT
-  USING (tenant_id = app.current_tenant_id());
+  USING (app.is_service_context() OR tenant_id = app.tenant_id())
+  WITH CHECK (app.is_service_context() OR tenant_id = app.tenant_id());
 
-CREATE POLICY scans_tenant_insert
-  ON scans
-  FOR INSERT
-  WITH CHECK (tenant_id = app.current_tenant_id());
-
-CREATE POLICY scans_tenant_update_admin
-  ON scans
-  FOR UPDATE
-  USING (
-    tenant_id = app.current_tenant_id()
-    AND app.role_at_least('admin')
-  )
-  WITH CHECK (tenant_id = app.current_tenant_id());
-```
-
-### `organizations`
-
-```sql
-ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY organizations_tenant_select
+CREATE POLICY organizations_tenant_isolation
   ON organizations
-  FOR SELECT
-  USING (id = app.current_tenant_id());
+  USING (app.is_service_context() OR id = app.tenant_id())
+  WITH CHECK (app.is_service_context() OR id = app.tenant_id());
 
-CREATE POLICY organizations_tenant_admin_write
-  ON organizations
-  FOR UPDATE
-  USING (
-    id = app.current_tenant_id()
-    AND app.role_at_least('admin')
-  )
-  WITH CHECK (id = app.current_tenant_id());
-```
-
-### `organization_memberships`, `organization_invite_tokens`, `tenant_audit_logs`
-
-```sql
-ALTER TABLE organization_memberships ENABLE ROW LEVEL SECURITY;
-ALTER TABLE organization_invite_tokens ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tenant_audit_logs ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY memberships_tenant_select
+CREATE POLICY organization_memberships_tenant_isolation
   ON organization_memberships
-  FOR SELECT
-  USING (organization_id = app.current_tenant_id());
+  USING (app.is_service_context() OR organization_id = app.tenant_id())
+  WITH CHECK (app.is_service_context() OR organization_id = app.tenant_id());
 
-CREATE POLICY memberships_tenant_admin_write
-  ON organization_memberships
-  FOR INSERT, UPDATE, DELETE
-  USING (
-    organization_id = app.current_tenant_id()
-    AND app.role_at_least('admin')
-  )
-  WITH CHECK (
-    organization_id = app.current_tenant_id()
-    AND app.role_at_least('admin')
-  );
-
-CREATE POLICY invite_tokens_tenant_access
+CREATE POLICY organization_invite_tokens_tenant_isolation
   ON organization_invite_tokens
-  FOR ALL
-  USING (organization_id = app.current_tenant_id())
-  WITH CHECK (organization_id = app.current_tenant_id());
+  USING (app.is_service_context() OR organization_id = app.tenant_id())
+  WITH CHECK (app.is_service_context() OR organization_id = app.tenant_id());
 
-CREATE POLICY audit_logs_tenant_select
+CREATE POLICY tenant_audit_logs_tenant_isolation
   ON tenant_audit_logs
-  FOR SELECT
-  USING (organization_id = app.current_tenant_id());
+  USING (app.is_service_context() OR organization_id = app.tenant_id())
+  WITH CHECK (app.is_service_context() OR organization_id = app.tenant_id());
 ```
 
 ---
@@ -203,14 +156,14 @@ CREATE POLICY audit_logs_tenant_select
    - `organization_invite_tokens (organization_id, expires_at)`
 3. helper function 및 policy SQL migration 추가 (단, enforce 전까지 영향 최소화)
 
-### Phase B — Shadow 모드
+### Phase B — Shadow 모드 (`TENANT_RLS_MODE=shadow`)
 
-1. 앱에서 request 단위로 세션 변수 주입 시작
+1. 앱에서 요청/영속화 작업 단위로 세션 변수 주입 시작
 2. 기존 애플리케이션 필터(`WHERE tenant_id = ...`)는 유지
 3. staging에서 role 전환 없이 query behavior/log 비교
    - tenant 경계 위반 시도 시 expected rejection 시나리오 리허설
 
-### Phase C — Enforce 모드
+### Phase C — Enforce 모드 (`TENANT_RLS_MODE=enforce`)
 
 1. runtime DB credential을 **RLS bypass 권한이 없는 app role**로 전환
 2. 대상 테이블 `ENABLE ROW LEVEL SECURITY` + 필요 테이블 `FORCE ROW LEVEL SECURITY` 적용
@@ -227,13 +180,17 @@ CREATE POLICY audit_logs_tenant_select
 
 ## 8) 롤백 계획
 
-롤백은 **코드 롤백 + DB 정책 완화** 두 축으로 즉시 수행한다.
+롤백은 **모드 롤백 + 필요 시 DB 수동 완화** 순서로 즉시 수행한다.
 
-1. 앱 롤백
+1. 모드 롤백 (권장, 즉시)
+   - `TENANT_RLS_MODE=off`로 재배포/재시작
+   - 앱 startup에서 대상 테이블에 `NO FORCE + DISABLE ROW LEVEL SECURITY`를 자동 적용
+
+2. 앱/자격증명 롤백 (필요 시)
    - runtime DB credential을 기존 권한(비-RLS 경로)으로 되돌림
    - 직전 안정 릴리즈로 즉시 재배포
 
-2. DB 완화 (필요 시)
+3. DB 수동 완화 (긴급 대응용)
 
 ```sql
 ALTER TABLE scans NO FORCE ROW LEVEL SECURITY;
@@ -249,7 +206,7 @@ ALTER TABLE organization_invite_tokens DISABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_audit_logs DISABLE ROW LEVEL SECURITY;
 ```
 
-3. 사후 조치
+4. 사후 조치
    - 실패 요청 샘플/로그 수집
    - 정책 충돌 쿼리 재현 후 수정
    - staging 재검증 완료 후 재시도
@@ -266,9 +223,24 @@ ALTER TABLE tenant_audit_logs DISABLE ROW LEVEL SECURITY;
 
 ---
 
-## 10) 산출물 상태
+## 10) 산출물 상태 (Ops MVP Phase K)
 
-- 본 문서: **완료 (설계 확정안)**
-- DB migration 코드: 후속 구현 대상
-- 앱 DB 세션 helper 적용: 후속 구현 대상
+- 본 문서: **완료 (설계 + 운영 runbook 반영)**
+- DB migration 코드: **완료**
+  - `006_tenant_rls_preview`
+  - `app` schema helper 함수(`tenant_id`, `user_id`, `user_role`, `is_service_context`) 추가
+  - tenant 대상 테이블 RLS policy + role 생성 idempotency hook(`pg_roles`/`pg_policies`) 반영
+- 앱 DB 세션 helper 적용: **완료 (preview 범위)**
+  - `TENANT_RLS_MODE=shadow|enforce`에서 transaction-local `set_config` 주입
+  - startup/hydration/retention prune은 `service` 컨텍스트로 실행
+- 런타임 enforce 토글: **완료**
+  - `TENANT_RLS_MODE=enforce`: 대상 테이블 `ENABLE + FORCE`
+  - `TENANT_RLS_MODE=off|shadow`: 대상 테이블 `NO FORCE + DISABLE`
+
+## 11) 현재 제약/주의사항 (preview)
+
+- 현재 아키텍처는 PostgreSQL을 **영속화 계층**으로 사용하고, API read/write는 인메모리 스토어 중심으로 동작한다.
+- 따라서 RLS enforce는 tenant 대상 영속화 테이블 경계 강화 용도로 우선 적용되며,
+  queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지한다.
+- full request-path RLS(모든 조회를 DB direct query로 강제)는 후속 구조 전환 시점에 단계적으로 확장한다.
 
