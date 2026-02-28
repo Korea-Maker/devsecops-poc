@@ -9,6 +9,9 @@ import {
 import {
   clearPersistedOrganizationsAndMemberships,
   deletePersistedMembership,
+  getActiveDataBackend,
+  getPersistedOrganizationForTenant,
+  listPersistedMembershipsForTenant,
   persistMembershipRecord,
   persistOrganizationInviteTokenRecord,
   persistOrganizationRecord,
@@ -23,6 +26,12 @@ interface ListQueryOptions {
   search?: string;
   page?: number;
   limit?: number;
+}
+
+interface TenantScopedReadOptions {
+  tenantId: string;
+  userId?: string;
+  userRole?: UserRole;
 }
 
 const DEFAULT_ORG_NAME = "Default Organization";
@@ -275,6 +284,35 @@ export function getOrganization(id: string): Organization | undefined {
 }
 
 /**
+ * 요청 경로 read 최적화(조직 단건):
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 스토어를 사용
+ */
+export async function getOrganizationForTenantReadPath(
+  params: TenantScopedReadOptions & { id: string }
+): Promise<Organization | undefined> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedOrganization = await getPersistedOrganizationForTenant({
+      organizationId: params.id,
+      tenantId: params.tenantId,
+      userId: params.userId,
+      userRole: params.userRole,
+    });
+
+    if (persistedOrganization !== null) {
+      return persistedOrganization;
+    }
+  }
+
+  const organization = getOrganization(params.id);
+  if (!organization || organization.id !== params.tenantId) {
+    return undefined;
+  }
+
+  return organization;
+}
+
+/**
  * 전체 조직 목록을 반환합니다.
  */
 export function listOrganizations(options: ListQueryOptions = {}): Organization[] {
@@ -371,6 +409,46 @@ export function listMemberships(
 
   memberships = applyPagination(memberships, options);
   return memberships;
+}
+
+/**
+ * 요청 경로 read 최적화(조직 멤버십 목록):
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 스토어를 사용
+ */
+export async function listMembershipsForTenantReadPath(
+  params: TenantScopedReadOptions & {
+    organizationId: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+  }
+): Promise<OrganizationMembership[]> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedMemberships = await listPersistedMembershipsForTenant({
+      organizationId: params.organizationId,
+      tenantId: params.tenantId,
+      search: params.search,
+      page: params.page,
+      limit: params.limit,
+      userId: params.userId,
+      userRole: params.userRole,
+    });
+
+    if (persistedMemberships !== null) {
+      return persistedMemberships;
+    }
+  }
+
+  if (params.organizationId !== params.tenantId) {
+    return [];
+  }
+
+  return listMemberships(params.organizationId, {
+    search: params.search,
+    page: params.page,
+    limit: params.limit,
+  });
 }
 
 /**

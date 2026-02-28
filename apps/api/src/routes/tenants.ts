@@ -6,7 +6,9 @@ import {
   createOrganizationInviteToken,
   disableOrganization,
   getOrganization,
+  getOrganizationForTenantReadPath,
   listMemberships,
+  listMembershipsForTenantReadPath,
   listOrganizations,
   removeMembership,
   updateMembershipRole,
@@ -627,7 +629,15 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         return;
       }
 
-      const organization = getOrganization(request.params.id);
+      const organization =
+        getTenantAuthMode() === "required"
+          ? await getOrganizationForTenantReadPath({
+              id: request.params.id,
+              tenantId: request.tenantContext.tenantId,
+              userId: request.tenantContext.userId,
+              userRole: request.tenantContext.role,
+            })
+          : getOrganization(request.params.id);
       if (!organization) {
         return sendError(reply, 404, "조직을 찾을 수 없습니다", "TENANT_ORG_NOT_FOUND");
       }
@@ -681,6 +691,19 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     const listQuery = parseListQuery(request.query);
     if (!listQuery.ok) {
       return sendError(reply, 400, listQuery.error, listQuery.code);
+    }
+
+    if (getTenantAuthMode() === "required") {
+      const memberships = await listMembershipsForTenantReadPath({
+        organizationId: request.params.id,
+        tenantId: request.tenantContext.tenantId,
+        search: listQuery.options.search,
+        page: listQuery.options.page,
+        limit: listQuery.options.limit,
+        userId: request.tenantContext.userId,
+        userRole: request.tenantContext.role,
+      });
+      return reply.status(200).send(memberships);
     }
 
     return reply.status(200).send(listMemberships(request.params.id, listQuery.options));

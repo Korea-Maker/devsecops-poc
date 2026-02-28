@@ -97,8 +97,21 @@ export interface PersistedScanGetQuery extends TenantScopedReadContext {
   scanId: string;
 }
 
+export interface PersistedOrganizationGetQuery extends TenantScopedReadContext {
+  organizationId: string;
+}
+
+export interface PersistedMembershipListQuery extends TenantScopedReadContext {
+  organizationId: string;
+  search?: string;
+  page?: number;
+  limit?: number;
+}
+
 const DEFAULT_TENANT_READ_CONTEXT_USER_ID = "runtime-reader";
 const DEFAULT_TENANT_READ_CONTEXT_ROLE: OrganizationMembership["role"] = "viewer";
+const DEFAULT_LIST_PAGE = 1;
+const DEFAULT_LIST_LIMIT = 20;
 
 const SYSTEM_TENANT_RLS_CONTEXT: TenantRlsSessionContext = {
   tenantId: "*",
@@ -378,6 +391,38 @@ function createTenantRlsContextForRead(context: TenantScopedReadContext): Tenant
         : DEFAULT_TENANT_READ_CONTEXT_USER_ID,
     userRole: context.userRole ?? DEFAULT_TENANT_READ_CONTEXT_ROLE,
   });
+}
+
+function normalizeOptionalSearchTerm(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function resolveListPagination(options: {
+  page?: number;
+  limit?: number;
+}): { limit?: number; offset?: number } {
+  if (options.page === undefined && options.limit === undefined) {
+    return {};
+  }
+
+  const page =
+    typeof options.page === "number" && Number.isInteger(options.page) && options.page > 0
+      ? options.page
+      : DEFAULT_LIST_PAGE;
+  const limit =
+    typeof options.limit === "number" && Number.isInteger(options.limit) && options.limit > 0
+      ? options.limit
+      : DEFAULT_LIST_LIMIT;
+
+  return {
+    limit,
+    offset: (page - 1) * limit,
+  };
 }
 
 function isServiceTenantRlsContext(context: TenantRlsSessionContext): boolean {
@@ -1372,6 +1417,135 @@ export async function getPersistedScanForTenant(
 
       const row = result.rows[0];
       return row ? mapScanRowToRecord(row) : undefined;
+    },
+    activeTenantRlsMode,
+    "tenant"
+  );
+}
+
+export async function getPersistedOrganizationForTenant(
+  query: PersistedOrganizationGetQuery
+): Promise<Organization | undefined | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  const normalizedOrganizationId = query.organizationId.trim();
+  if (normalizedOrganizationId.length === 0) {
+    return undefined;
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const tenantRlsContext = createTenantRlsContextForRead(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "getPersistedOrganizationForTenant",
+    tenantRlsContext,
+    async () => {
+      const result = await client.query<OrganizationRow>(
+        `
+          SELECT
+            id,
+            name,
+            slug,
+            active,
+            created_at,
+            disabled_at
+          FROM organizations
+          WHERE id = $1 AND id = $2
+          LIMIT 1
+        `,
+        [normalizedOrganizationId, tenantRlsContext.tenantId]
+      );
+
+      const row = result.rows[0];
+      return row ? mapOrganizationRowToEntity(row) : undefined;
+    },
+    activeTenantRlsMode,
+    "tenant"
+  );
+}
+
+export async function listPersistedMembershipsForTenant(
+  query: PersistedMembershipListQuery
+): Promise<OrganizationMembership[] | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  const normalizedOrganizationId = query.organizationId.trim();
+  if (normalizedOrganizationId.length === 0) {
+    return [];
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const tenantRlsContext = createTenantRlsContextForRead(query);
+  const normalizedSearch = normalizeOptionalSearchTerm(query.search);
+  const pagination = resolveListPagination(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "listPersistedMembershipsForTenant",
+    tenantRlsContext,
+    async () => {
+      const whereClauses = ["organization_id = $1", "organization_id = $2"];
+      const values: unknown[] = [normalizedOrganizationId, tenantRlsContext.tenantId];
+
+      if (normalizedSearch) {
+        values.push(`%${normalizedSearch}%`);
+        const searchParam = `$${values.length}`;
+        whereClauses.push(
+          `(LOWER(user_id) LIKE ${searchParam} OR LOWER(role) LIKE ${searchParam})`
+        );
+      }
+
+      const paginationClauses: string[] = [];
+      if (pagination.limit !== undefined && pagination.offset !== undefined) {
+        values.push(pagination.limit);
+        const limitParam = `$${values.length}`;
+
+        values.push(pagination.offset);
+        const offsetParam = `$${values.length}`;
+
+        paginationClauses.push(`LIMIT ${limitParam}`);
+        paginationClauses.push(`OFFSET ${offsetParam}`);
+      }
+
+      const paginationSql =
+        paginationClauses.length > 0
+          ? `
+          ${paginationClauses.join("\n          ")}`
+          : "";
+
+      const result = await client.query<MembershipRow>(
+        `
+          SELECT
+            organization_id,
+            user_id,
+            role,
+            created_at,
+            updated_at
+          FROM organization_memberships
+          WHERE ${whereClauses.join(" AND ")}
+          ORDER BY created_at ASC${paginationSql}
+        `,
+        values
+      );
+
+      return result.rows.map(mapMembershipRowToEntity);
     },
     activeTenantRlsMode,
     "tenant"

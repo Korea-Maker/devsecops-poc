@@ -147,6 +147,14 @@
     - `warn`: mismatch 경고 로그, `enforce`: mismatch 즉시 차단
   - 관련 테스트/문서 갱신
 
+- [x] Ops MVP Phase N request-path DB direct read coverage 확장
+  - 대상 endpoint(tenant scope):
+    - `GET /api/v1/organizations/:id`
+    - `GET /api/v1/organizations/:id/memberships`
+  - `DATA_BACKEND=postgres`일 때 tenant-scoped direct query 우선 사용, memory backend 동작/응답 shape 유지
+  - DB query 레이어에서 tenant scope 조건을 명시적으로 강제하고 runtime guard 모드(`TENANT_RLS_RUNTIME_GUARD_MODE`)와 정합 유지
+  - read path 선택 + tenant 필터링 검증 테스트 및 README/백로그 문서 갱신
+
 ---
 
 ## 아직 남은 작업 (Phase 5 후속)
@@ -166,7 +174,7 @@
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
 - [x] tenant RLS migration/role 분리 opt-in preview 적용 (`TENANT_RLS_MODE`)
-- [ ] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id` pilot 전환 완료)
+- [ ] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships` 전환 완료)
 - [ ] runtime role separation guard 운영 기본값/롤아웃 정책 확정 (`TENANT_RLS_RUNTIME_GUARD_MODE` warn/enforce 전환 절차)
 - [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
