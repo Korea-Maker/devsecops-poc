@@ -8,6 +8,7 @@ import {
   shutdownDataBackend,
 } from "./storage/backend.js";
 import { hydrateScanStore } from "./scanner/store.js";
+import { hydrateQueueState } from "./scanner/queue.js";
 import { hydrateOrganizationStore } from "./tenants/store.js";
 import { hydrateTenantAuditLogs } from "./tenants/audit-log.js";
 
@@ -20,6 +21,7 @@ export function buildApp() {
     const initResult = await initializeDataBackend({ logger: app.log });
 
     hydrateScanStore(initResult.persistedState.scans);
+    hydrateQueueState(initResult.persistedState.queue);
     hydrateOrganizationStore({
       organizations: initResult.persistedState.organizations,
       memberships: initResult.persistedState.memberships,

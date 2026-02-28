@@ -109,17 +109,21 @@
   - 원격 저장소 URL(`http/https/ssh/git@/file://`)이면 스캔 전 임시 디렉터리에 `git clone --depth 1 --branch <branch>` 수행
   - 어댑터에는 clone된 로컬 경로를 전달해 CLI를 실행하고, 처리 성공/실패와 무관하게 임시 clone 정리(cleanup)
 - 실패 처리: retry + exponential backoff + dead-letter 지원
-- 워커 중지 정책: `stopScanWorker()` 호출 시 pending retry timer를 모두 취소해 stop 이후 예기치 않은 재enqueue를 방지
+- 워커 종료 정책:
+  - 일반 stop: `stopScanWorker()`는 pending retry timer를 취소해 stop 이후 예기치 않은 재enqueue를 방지
+  - 프로세스 shutdown: `stopScanWorkerAndDrain()`는 pending retry를 queue로 materialize하고 in-flight 처리 종료까지 대기
 
 데이터 저장 백엔드:
 
 - `DATA_BACKEND`: `memory | postgres` (기본값 `memory`)
 - `DATA_BACKEND=postgres` + `DATABASE_URL` 설정 시 다음 엔티티를 PostgreSQL에 영속화
   - scans (`retryCount`, `lastError`, `lastErrorCode`, `findings` 포함)
+  - scan queue jobs (FIFO 순서 보존)
+  - scan dead-letter items
   - organizations
   - memberships
   - tenant audit logs
-- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어를 hydrate
+- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/org/membership/audit log)를 hydrate
 - 테이블이 없어도 자동 bootstrap SQL(`CREATE TABLE IF NOT EXISTS`)을 실행해 안전하게 기동
 
 주요 스캔/테넌트 환경변수:
@@ -249,7 +253,7 @@ pnpm --filter @devsecops/web build
 
 ## 현재 제약 사항
 
-- **부분 영속화 범위**: `DATA_BACKEND=postgres`에서 scans/organizations/memberships/tenant audit logs만 영속화됨 (queue/dead-letter는 아직 인메모리)
+- **재기동 엣지케이스**: 비정상 크래시(프로세스 강제 종료) 시 in-flight 작업의 즉시 복구는 보장하지 않음 — 재시도/재처리 정책은 후속 고도화 필요
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: JWT 검증은 구현되었지만 Google SSO/OAuth 로그인(웹 세션 발급), 토큰 회전 자동화, IdP 운영 가이드는 후속 구현 필요
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)

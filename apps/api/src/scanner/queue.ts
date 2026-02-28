@@ -1,3 +1,8 @@
+import {
+  persistQueueState,
+  type PersistedDeadLetterItem,
+  type PersistedQueueState,
+} from "../storage/backend.js";
 import { getScanExecutionMode } from "./adapters/common.js";
 import { getAdapter } from "./registry.js";
 import { isSourcePrepError, prepareScanSource } from "./source-prep.js";
@@ -9,19 +14,15 @@ const DEFAULT_WORKER_INTERVAL_MS = 250;
 const MOCK_SCAN_DURATION_MS = 30;
 const DEFAULT_RETRY_BACKOFF_BASE_MS = 100;
 const DEFAULT_MAX_RETRY_COUNT = 2;
+const WORKER_DRAIN_POLL_INTERVAL_MS = 10;
+const DEFAULT_WORKER_DRAIN_TIMEOUT_MS = 5_000;
 const SCANNER_QUEUE_LOG_PREFIX = "[scanner-queue]";
 
 /** 인메모리 FIFO 스캔 작업 큐 */
 const scanJobQueue: string[] = [];
 const deadLetterQueue: DeadLetterItem[] = [];
 
-interface DeadLetterItem {
-  scanId: string;
-  retryCount: number;
-  error: string;
-  code?: ScanRuntimeErrorCode;
-  failedAt: string;
-}
+type DeadLetterItem = PersistedDeadLetterItem;
 
 export type RedriveDeadLetterResult = "accepted" | "not_found" | "orphaned_scan";
 export type ScanRuntimeErrorCode = ScanErrorCode;
@@ -57,6 +58,50 @@ const retryTimers = new Map<NodeJS.Timeout, string>();
 const forcedFailureByScanId = new Map<string, number>();
 // 테스트에서 cleanup 실패 관측 경로를 검증하기 위한 주입 훅
 const forcedCleanupFailureByScanId = new Set<string>();
+
+interface StopScanWorkerOptions {
+  /**
+   * true일 때 pending retry timer에 걸려 있던 작업을 즉시 queue로 materialize한 뒤 타이머를 정리합니다.
+   * 기본값(false)은 기존 정책처럼 타이머만 취소합니다.
+   */
+  materializePendingRetries?: boolean;
+}
+
+function cloneDeadLetterItem(item: PersistedDeadLetterItem): DeadLetterItem {
+  return {
+    ...item,
+  };
+}
+
+function createQueueStateSnapshot(): PersistedQueueState {
+  return {
+    queuedScanIds: [...scanJobQueue],
+    deadLetters: deadLetterQueue.map(cloneDeadLetterItem),
+  };
+}
+
+function persistCurrentQueueState(): void {
+  persistQueueState(createQueueStateSnapshot());
+}
+
+export function hydrateQueueState(state: PersistedQueueState): void {
+  scanJobQueue.length = 0;
+  deadLetterQueue.length = 0;
+
+  for (const scanId of state.queuedScanIds) {
+    scanJobQueue.push(scanId);
+  }
+
+  for (const item of state.deadLetters) {
+    deadLetterQueue.push(cloneDeadLetterItem(item));
+  }
+
+  clearPendingRetryTimers();
+  forcedFailureByScanId.clear();
+  forcedCleanupFailureByScanId.clear();
+  isProcessing = false;
+  processingScanId = null;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -134,7 +179,11 @@ function matchesTenantFilter(scanId: string, filter?: QueueTenantFilter): boolea
 
 function dequeueNextScanId(filter?: QueueTenantFilter): string | undefined {
   if (!filter?.tenantId) {
-    return scanJobQueue.shift();
+    const nextScanId = scanJobQueue.shift();
+    if (nextScanId) {
+      persistCurrentQueueState();
+    }
+    return nextScanId;
   }
 
   const targetIndex = scanJobQueue.findIndex((scanId) =>
@@ -146,6 +195,9 @@ function dequeueNextScanId(filter?: QueueTenantFilter): string | undefined {
   }
 
   const [scanId] = scanJobQueue.splice(targetIndex, 1);
+  if (scanId) {
+    persistCurrentQueueState();
+  }
   return scanId;
 }
 
@@ -157,11 +209,22 @@ function isTenantScopedProcessingBusy(filter?: QueueTenantFilter): boolean {
   return matchesTenantFilter(processingScanId, filter);
 }
 
+function enqueueScanInternal(
+  scanId: string,
+  options: { persist?: boolean } = {}
+): void {
+  scanJobQueue.push(scanId);
+
+  if (options.persist ?? true) {
+    persistCurrentQueueState();
+  }
+}
+
 /**
  * 스캔 작업을 큐에 추가합니다.
  */
 export function enqueueScan(scanId: string): void {
-  scanJobQueue.push(scanId);
+  enqueueScanInternal(scanId);
 }
 
 /**
@@ -231,7 +294,8 @@ export function redriveDeadLetter(
   }
 
   removeDeadLetterIndexes(deadLetterIndexes);
-  enqueueScan(scanId);
+  enqueueScanInternal(scanId, { persist: false });
+  persistCurrentQueueState();
   return "accepted";
 }
 
@@ -281,11 +345,22 @@ function scheduleRetry(scanId: string, backoffMs: number): void {
   retryTimers.set(retryTimer, scanId);
 }
 
-function clearPendingRetryTimers(): void {
-  for (const retryTimer of retryTimers.keys()) {
+function clearPendingRetryTimers(options: { materializeIntoQueue?: boolean } = {}): void {
+  const bufferedScanIds: string[] = [];
+
+  for (const [retryTimer, scanId] of retryTimers.entries()) {
     clearTimeout(retryTimer);
+    if (options.materializeIntoQueue) {
+      bufferedScanIds.push(scanId);
+    }
   }
   retryTimers.clear();
+
+  if (options.materializeIntoQueue) {
+    for (const scanId of bufferedScanIds) {
+      enqueueScanInternal(scanId, { persist: false });
+    }
+  }
 }
 
 function toErrorMessage(error: unknown): string {
@@ -367,6 +442,26 @@ export function getQueueStatus(filter?: QueueTenantFilter): ScanQueueStatus {
     workerRunning: isScanWorkerRunning(),
     processing,
   };
+}
+
+/**
+ * 현재 처리 중인 작업이 끝날 때까지 최대 timeoutMs 동안 대기합니다.
+ * 반환값: true(대기 중 idle 도달), false(타임아웃)
+ */
+export async function waitForQueueIdle(
+  timeoutMs = DEFAULT_WORKER_DRAIN_TIMEOUT_MS
+): Promise<boolean> {
+  const startedAt = Date.now();
+
+  while (isProcessing) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      return false;
+    }
+
+    await delay(WORKER_DRAIN_POLL_INTERVAL_MS);
+  }
+
+  return true;
 }
 
 /**
@@ -479,6 +574,7 @@ export async function processNextScanJob(
       code: runtimeError.code,
       failedAt: new Date().toISOString(),
     });
+    persistCurrentQueueState();
     return { processed: true, busy: false };
   } finally {
     if (sourceCleanup) {
@@ -517,15 +613,43 @@ export function startScanWorker(intervalMs = DEFAULT_WORKER_INTERVAL_MS): void {
 
 /**
  * 실행 중인 큐 워커를 중지합니다.
- * 정책: 워커 중지 시점에 pending retry timer도 모두 취소한다.
- * - 목적: stop 이후 retry timer 잔존으로 인한 예기치 않은 재enqueue 방지
+ * 기본 정책: 워커 중지 시점에 pending retry timer를 취소해 stop 이후 예기치 않은 재enqueue를 막습니다.
+ *
+ * - materializePendingRetries=true: shutdown 직전 복구성 강화를 위해 pending retry를 즉시 queue로 이동
+ * - materializePendingRetries=false(default): 기존 동작 유지(타이머 취소만 수행)
  */
-export function stopScanWorker(): void {
+export function stopScanWorker(options: StopScanWorkerOptions = {}): void {
   if (workerTimer) {
     clearInterval(workerTimer);
     workerTimer = null;
   }
-  clearPendingRetryTimers();
+
+  clearPendingRetryTimers({
+    materializeIntoQueue: options.materializePendingRetries ?? false,
+  });
+  persistCurrentQueueState();
+}
+
+/**
+ * 워커를 중지한 뒤 현재 진행 중인 1건 처리 종료까지 대기합니다.
+ * timeout 내 종료하지 못하면 경고 로그만 남기고 반환합니다.
+ */
+export async function stopScanWorkerAndDrain(
+  options: {
+    timeoutMs?: number;
+    materializePendingRetries?: boolean;
+  } = {}
+): Promise<void> {
+  stopScanWorker({
+    materializePendingRetries: options.materializePendingRetries ?? true,
+  });
+
+  const drained = await waitForQueueIdle(options.timeoutMs);
+  if (!drained) {
+    console.warn(
+      `${SCANNER_QUEUE_LOG_PREFIX} drain timeout: processing 작업이 timeout 내 종료되지 않았습니다`
+    );
+  }
 }
 
 /**
@@ -539,4 +663,5 @@ export function clearQueue(): void {
   isProcessing = false;
   processingScanId = null;
   clearPendingRetryTimers();
+  persistCurrentQueueState();
 }

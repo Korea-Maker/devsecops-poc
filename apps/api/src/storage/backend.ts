@@ -14,11 +14,25 @@ export type DataBackendInitFallbackReason =
   | "missing_database_url"
   | "connection_failed";
 
+export interface PersistedDeadLetterItem {
+  scanId: string;
+  retryCount: number;
+  error: string;
+  code?: ScanErrorCode;
+  failedAt: string;
+}
+
+export interface PersistedQueueState {
+  queuedScanIds: string[];
+  deadLetters: PersistedDeadLetterItem[];
+}
+
 export interface PersistedState {
   scans: ScanRecord[];
   organizations: Organization[];
   memberships: OrganizationMembership[];
   tenantAuditLogs: TenantAuditLog[];
+  queue: PersistedQueueState;
 }
 
 export interface DataBackendInitResult {
@@ -89,6 +103,20 @@ interface TenantAuditLogRow extends QueryResultRow {
   created_at: string;
 }
 
+interface ScanQueueJobRow extends QueryResultRow {
+  scan_id: string;
+  position: number;
+}
+
+interface ScanDeadLetterRow extends QueryResultRow {
+  id: number;
+  scan_id: string;
+  retry_count: number;
+  error: string;
+  code: ScanErrorCode | null;
+  failed_at: string;
+}
+
 let activeBackend: DataBackend = "memory";
 let sqlClient: SqlClient | null = null;
 let initPromise: Promise<DataBackendInitResult> | null = null;
@@ -101,6 +129,10 @@ function createEmptyPersistedState(): PersistedState {
     organizations: [],
     memberships: [],
     tenantAuditLogs: [],
+    queue: {
+      queuedScanIds: [],
+      deadLetters: [],
+    },
   };
 }
 
@@ -244,6 +276,32 @@ async function ensureBootstrapSchema(client: SqlClient): Promise<void> {
     "CREATE INDEX IF NOT EXISTS idx_tenant_audit_org_created_at ON tenant_audit_logs (organization_id, created_at DESC)"
   );
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS scan_queue_jobs (
+      position BIGSERIAL PRIMARY KEY,
+      scan_id TEXT NOT NULL
+    )
+  `);
+
+  await client.query(
+    "CREATE INDEX IF NOT EXISTS idx_scan_queue_jobs_scan_id ON scan_queue_jobs (scan_id)"
+  );
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS scan_dead_letters (
+      id BIGSERIAL PRIMARY KEY,
+      scan_id TEXT NOT NULL,
+      retry_count INTEGER NOT NULL,
+      error TEXT NOT NULL,
+      code TEXT,
+      failed_at TEXT NOT NULL
+    )
+  `);
+
+  await client.query(
+    "CREATE INDEX IF NOT EXISTS idx_scan_dead_letters_scan_id ON scan_dead_letters (scan_id)"
+  );
+
   await client.query(
     `
       INSERT INTO organizations (id, name, slug, created_at)
@@ -364,11 +422,29 @@ function mapAuditLogRowToEntity(row: TenantAuditLogRow): TenantAuditLog {
   };
 }
 
+function mapQueueDeadLetterRowToEntity(
+  row: ScanDeadLetterRow
+): PersistedDeadLetterItem {
+  return {
+    scanId: row.scan_id,
+    retryCount: row.retry_count,
+    error: row.error,
+    code: row.code ?? undefined,
+    failedAt: row.failed_at,
+  };
+}
+
 async function readPersistedState(client: SqlClient): Promise<PersistedState> {
-  const [scansResult, organizationsResult, membershipsResult, auditLogsResult] =
-    await Promise.all([
-      client.query<ScanRow>(
-        `
+  const [
+    scansResult,
+    organizationsResult,
+    membershipsResult,
+    auditLogsResult,
+    queueJobsResult,
+    deadLettersResult,
+  ] = await Promise.all([
+    client.query<ScanRow>(
+      `
           SELECT
             id,
             tenant_id,
@@ -385,23 +461,23 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
           FROM scans
           ORDER BY created_at ASC
         `
-      ),
-      client.query<OrganizationRow>(
-        `
+    ),
+    client.query<OrganizationRow>(
+      `
           SELECT id, name, slug, created_at
           FROM organizations
           ORDER BY created_at ASC
         `
-      ),
-      client.query<MembershipRow>(
-        `
+    ),
+    client.query<MembershipRow>(
+      `
           SELECT organization_id, user_id, role, created_at, updated_at
           FROM organization_memberships
           ORDER BY created_at ASC
         `
-      ),
-      client.query<TenantAuditLogRow>(
-        `
+    ),
+    client.query<TenantAuditLogRow>(
+      `
           SELECT
             id,
             organization_id,
@@ -413,14 +489,32 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
           FROM tenant_audit_logs
           ORDER BY created_at ASC
         `
-      ),
-    ]);
+    ),
+    client.query<ScanQueueJobRow>(
+      `
+          SELECT scan_id, position
+          FROM scan_queue_jobs
+          ORDER BY position ASC
+        `
+    ),
+    client.query<ScanDeadLetterRow>(
+      `
+          SELECT id, scan_id, retry_count, error, code, failed_at
+          FROM scan_dead_letters
+          ORDER BY id ASC
+        `
+    ),
+  ]);
 
   return {
     scans: scansResult.rows.map(mapScanRowToRecord),
     organizations: organizationsResult.rows.map(mapOrganizationRowToEntity),
     memberships: membershipsResult.rows.map(mapMembershipRowToEntity),
     tenantAuditLogs: auditLogsResult.rows.map(mapAuditLogRowToEntity),
+    queue: {
+      queuedScanIds: queueJobsResult.rows.map((row) => row.scan_id),
+      deadLetters: deadLettersResult.rows.map(mapQueueDeadLetterRowToEntity),
+    },
   };
 }
 
@@ -470,11 +564,13 @@ export async function initializeDataBackend(
       candidateClient = null;
       activeBackend = "postgres";
       info(
-        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d)",
+        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d)",
         persistedState.scans.length,
         persistedState.organizations.length,
         persistedState.memberships.length,
-        persistedState.tenantAuditLogs.length
+        persistedState.tenantAuditLogs.length,
+        persistedState.queue.queuedScanIds.length,
+        persistedState.queue.deadLetters.length
       );
 
       return {
@@ -606,6 +702,43 @@ export function persistScanRecord(record: ScanRecord): void {
 export function clearPersistedScans(): void {
   schedulePersistenceTask("clearPersistedScans", async (client) => {
     await client.query("DELETE FROM scans");
+  });
+}
+
+export function persistQueueState(state: PersistedQueueState): void {
+  const snapshotQueuedScanIds = [...state.queuedScanIds];
+  const snapshotDeadLetters = state.deadLetters.map((item) => ({ ...item }));
+
+  schedulePersistenceTask("persistQueueState", async (client) => {
+    await client.query("DELETE FROM scan_queue_jobs");
+    await client.query("DELETE FROM scan_dead_letters");
+
+    for (const scanId of snapshotQueuedScanIds) {
+      await client.query(
+        `
+          INSERT INTO scan_queue_jobs (scan_id)
+          VALUES ($1)
+        `,
+        [scanId]
+      );
+    }
+
+    for (const item of snapshotDeadLetters) {
+      await client.query(
+        `
+          INSERT INTO scan_dead_letters (scan_id, retry_count, error, code, failed_at)
+          VALUES ($1, $2, $3, $4, $5)
+        `,
+        [item.scanId, item.retryCount, item.error, item.code ?? null, item.failedAt]
+      );
+    }
+  });
+}
+
+export function clearPersistedQueueState(): void {
+  schedulePersistenceTask("clearPersistedQueueState", async (client) => {
+    await client.query("DELETE FROM scan_queue_jobs");
+    await client.query("DELETE FROM scan_dead_letters");
   });
 }
 

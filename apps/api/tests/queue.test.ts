@@ -6,12 +6,14 @@ import {
   getPendingRetryTimerCount,
   getQueueSize,
   getQueueStatus,
+  hydrateQueueState,
   listDeadLetters,
   processNextScanJob,
   redriveDeadLetter,
   setCleanupFailureForTest,
   setScanForcedFailuresForTest,
   stopScanWorker,
+  stopScanWorkerAndDrain,
 } from "../src/scanner/queue.js";
 import { clearStore, createScan, getScan } from "../src/scanner/store.js";
 
@@ -48,6 +50,42 @@ describe("Scan Queue", () => {
   it("처리할 job이 없으면 processed=false, busy=false를 반환해야 한다", async () => {
     const processResult = await processNextScanJob();
     expect(processResult).toEqual({ processed: false, busy: false });
+  });
+
+  it("hydrateQueueState는 persisted queue/dead-letter 스냅샷을 인메모리로 복원해야 한다", () => {
+    const snapshot = {
+      queuedScanIds: ["scan-queued-1", "scan-queued-2"],
+      deadLetters: [
+        {
+          scanId: "scan-dead-1",
+          retryCount: 2,
+          error: "스캔 실행에 실패했습니다",
+          code: "SCAN_EXECUTION_FAILED" as const,
+          failedAt: "2026-03-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    hydrateQueueState(snapshot);
+
+    expect(getQueueSize()).toBe(2);
+    expect(getDeadLetterSize()).toBe(1);
+    expect(listDeadLetters()).toEqual([
+      {
+        scanId: "scan-dead-1",
+        retryCount: 2,
+        error: "스캔 실행에 실패했습니다",
+        code: "SCAN_EXECUTION_FAILED",
+        failedAt: "2026-03-01T00:00:00.000Z",
+      },
+    ]);
+
+    // hydrate 입력 객체를 외부에서 바꿔도 내부 상태는 영향받지 않아야 한다.
+    snapshot.queuedScanIds.push("scan-queued-3");
+    snapshot.deadLetters[0]!.error = "변조";
+
+    expect(getQueueSize()).toBe(2);
+    expect(listDeadLetters()[0]?.error).toBe("스캔 실행에 실패했습니다");
   });
 
   it("enqueue 후 processNextScanJob 호출 시 queued -> running -> completed로 전이되어야 한다", async () => {
@@ -252,6 +290,49 @@ describe("Scan Queue", () => {
     expect(getPendingRetryTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(getQueueSize()).toBe(0);
+  });
+
+  it("shutdown용 stopScanWorker(materializePendingRetries=true)는 retry 대기 작업을 queue에 복원해야 한다", async () => {
+    const record = createScan({
+      engine: "semgrep",
+      repoUrl: "https://github.com/test/repo-stop-retry-materialize",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+    setScanForcedFailuresForTest(record.id, 1);
+
+    vi.useFakeTimers();
+
+    const firstJobPromise = processNextScanJob();
+    await vi.advanceTimersByTimeAsync(40);
+    await firstJobPromise;
+
+    expect(getPendingRetryTimerCount()).toBe(1);
+    expect(getQueueSize()).toBe(0);
+
+    stopScanWorker({ materializePendingRetries: true });
+
+    expect(getPendingRetryTimerCount()).toBe(0);
+    expect(getQueueSize()).toBe(1);
+    expect(getScan(record.id)?.status).toBe("queued");
+  });
+
+  it("stopScanWorkerAndDrain은 처리 중인 1건 종료까지 대기해야 한다", async () => {
+    vi.useRealTimers();
+
+    const record = createScan({
+      engine: "semgrep",
+      repoUrl: "https://github.com/test/repo-stop-drain",
+      branch: "main",
+    });
+    enqueueScan(record.id);
+
+    const jobPromise = processNextScanJob();
+    await stopScanWorkerAndDrain({ timeoutMs: 1_000 });
+    await jobPromise;
+
+    expect(getQueueStatus().processing).toBe(false);
+    expect(getScan(record.id)?.status).toBe("completed");
   });
 
   it("cleanup 실패는 상태를 덮어쓰지 않고 warn 로그로 관측되어야 한다", async () => {

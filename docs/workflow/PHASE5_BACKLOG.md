@@ -55,9 +55,14 @@
   - 신규 환경변수: `DATA_BACKEND=memory|postgres` (기본 `memory`)
   - `DATA_BACKEND=postgres`에서 `DATABASE_URL` 기반 연결/초기화
   - 부팅 시 bootstrap SQL 실행(`CREATE TABLE IF NOT EXISTS`)으로 테이블 누락에도 안전 기동
-  - 부팅 hydration으로 scans/organizations/memberships/tenant audit logs를 인메모리 스토어로 복원
-  - 쓰기 경로 upsert/delete를 통해 위 4개 엔티티 영속화(기존 API 계약/응답 shape 유지)
+  - 부팅 hydration으로 scans/queue/dead-letter/organizations/memberships/tenant audit logs를 인메모리 스토어로 복원
+  - 쓰기 경로 upsert/delete + queue snapshot 저장으로 위 엔티티 영속화(기존 API 계약/응답 shape 유지)
   - postgres 초기화 실패 시 자동 memory fallback(서비스 기동 우선)
+
+- [x] 스캔 워커 lifecycle 신뢰성 보강
+  - 워커 시작 전 hydration 완료 순서 보장(`app.ready()` 이후 worker start)
+  - shutdown 시 `stopScanWorkerAndDrain()`으로 pending retry materialize + in-flight 처리 종료 대기
+  - onClose에서 backend persistence queue flush 후 연결 종료
 
 - [x] Tenant 도메인/스토어 보강
   - 파일: `apps/api/src/tenants/store.ts`
@@ -82,7 +87,7 @@
 - [ ] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정
 - [ ] OAuth/OIDC 로그인 플로우(웹) 연동 및 토큰 발급 체계 연결
 - [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
-- [ ] queue/dead-letter 영속화(현재는 인메모리 유지) + 재기동 복구 전략
+- [ ] 비정상 크래시 시 in-flight 작업/재시도 타이머의 즉시 복구 전략 고도화 (현재는 graceful shutdown 경로 우선 보장)
 - [ ] DB migration 버저닝/운영 마이그레이션 체계 정비
 - [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화

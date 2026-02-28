@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getActiveDataBackend,
   getConfiguredDataBackend,
   initializeDataBackend,
   parseDataBackend,
+  persistQueueState,
   resetDataBackendForTests,
 } from "../src/storage/backend.js";
 
@@ -24,6 +25,32 @@ const silentLogger = {
   warn: () => undefined,
   error: () => undefined,
 };
+
+function createQueryResult<T extends Record<string, unknown>>(rows: T[]) {
+  return {
+    rows,
+  } as never;
+}
+
+function createMockSqlClient(
+  resolver?: (sql: string, values?: unknown[]) => Record<string, unknown>[]
+) {
+  const query = vi.fn(async (sql: string, values?: unknown[]) => {
+    const rows = resolver?.(sql, values) ?? [];
+    return createQueryResult(rows);
+  });
+
+  const end = vi.fn(async () => undefined);
+
+  return {
+    client: {
+      query,
+      end,
+    },
+    query,
+    end,
+  };
+}
 
 afterEach(async () => {
   restoreEnv("DATA_BACKEND", ORIGINAL_DATA_BACKEND);
@@ -56,6 +83,10 @@ describe("data backend config", () => {
     expect(result.activeBackend).toBe("memory");
     expect(result.reason).toBe("missing_database_url");
     expect(result.persistedState.scans).toEqual([]);
+    expect(result.persistedState.queue).toEqual({
+      queuedScanIds: [],
+      deadLetters: [],
+    });
     expect(getActiveDataBackend()).toBe("memory");
   });
 
@@ -77,5 +108,102 @@ describe("data backend config", () => {
     expect(result.activeBackend).toBe("memory");
     expect(result.reason).toBe("connection_failed");
     expect(getActiveDataBackend()).toBe("memory");
+  });
+
+  it("postgres 초기화 시 queue/dead-letter 상태를 hydrate 해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const mock = createMockSqlClient((sql) => {
+      if (sql.includes("FROM scan_queue_jobs")) {
+        return [
+          { scan_id: "scan-queued-1", position: 1 },
+          { scan_id: "scan-queued-2", position: 2 },
+        ];
+      }
+
+      if (sql.includes("FROM scan_dead_letters")) {
+        return [
+          {
+            id: 1,
+            scan_id: "scan-dead-1",
+            retry_count: 2,
+            error: "스캔 실행에 실패했습니다",
+            code: "SCAN_EXECUTION_FAILED",
+            failed_at: "2026-03-01T00:00:00.000Z",
+          },
+        ];
+      }
+
+      return [];
+    });
+
+    const result = await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    expect(result.activeBackend).toBe("postgres");
+    expect(result.persistedState.queue).toEqual({
+      queuedScanIds: ["scan-queued-1", "scan-queued-2"],
+      deadLetters: [
+        {
+          scanId: "scan-dead-1",
+          retryCount: 2,
+          error: "스캔 실행에 실패했습니다",
+          code: "SCAN_EXECUTION_FAILED",
+          failedAt: "2026-03-01T00:00:00.000Z",
+        },
+      ],
+    });
+  });
+
+  it("persistQueueState는 postgres 모드에서 queue/dead-letter 스냅샷을 저장해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const mock = createMockSqlClient();
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    persistQueueState({
+      queuedScanIds: ["scan-a", "scan-b"],
+      deadLetters: [
+        {
+          scanId: "scan-failed-a",
+          retryCount: 2,
+          error: "스캔 실행에 실패했습니다",
+          code: "SCAN_EXECUTION_FAILED",
+          failedAt: "2026-03-01T00:10:00.000Z",
+        },
+      ],
+    });
+
+    await resetDataBackendForTests();
+
+    const statements = mock.query.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => sql.includes("DELETE FROM scan_queue_jobs"))).toBe(true);
+    expect(statements.some((sql) => sql.includes("DELETE FROM scan_dead_letters"))).toBe(true);
+
+    const queueInsertValues = mock.query.mock.calls
+      .filter(([sql]) => String(sql).includes("INSERT INTO scan_queue_jobs"))
+      .map(([, values]) => values);
+    expect(queueInsertValues).toEqual([["scan-a"], ["scan-b"]]);
+
+    const deadLetterInsertValues = mock.query.mock.calls
+      .filter(([sql]) => String(sql).includes("INSERT INTO scan_dead_letters"))
+      .map(([, values]) => values);
+    expect(deadLetterInsertValues).toEqual([
+      [
+        "scan-failed-a",
+        2,
+        "스캔 실행에 실패했습니다",
+        "SCAN_EXECUTION_FAILED",
+        "2026-03-01T00:10:00.000Z",
+      ],
+    ]);
   });
 });
