@@ -2,7 +2,7 @@
 
 ## 개요
 
-DevSecOps PoC의 배포 전략 및 파이프라인 설계. 현재 상태는 초안이며, 실제 구현은 Phase 5 이후 진행됩니다.
+DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke)은 반영되었고, 클라우드 인프라(ECS/ECR/Terraform 리소스)는 후속 고도화 대상으로 남아 있다.
 
 ---
 
@@ -188,81 +188,36 @@ aws ecs describe-services \
 
 ---
 
-## CI/CD 워크플로우 (향후 구현)
+## CI/CD 워크플로우 (현재 구현)
 
-### 현재 상태
+### 구현됨
 
-- `ci.yml`: 기본 lint, test (구현됨)
-- `security-scan.yml`: Semgrep, Trivy, Gitleaks (구현됨)
+- `ci.yml`: push/PR 린트/타입체크/테스트/빌드
+- `security-scan.yml`: PR 보안 스캔(Semgrep/Trivy/Gitleaks)
+- `deploy-staging.yml`:
+  - 트리거: `main` push + 수동 실행
+  - verify 게이트: API test/typecheck/build + Web typecheck/build
+  - preflight: 필수 secret/variable 누락 시 실패 대신 skip (Step Summary 사유 기록)
+  - deploy: staging deploy webhook 호출
+  - post-deploy: `infra/scripts/post-deploy-smoke-check.sh` 실행
+- `deploy-production.yml`:
+  - 트리거: `v*` tag push + 수동 실행(`confirm=DEPLOY_PROD`)
+  - staging과 동일한 verify/preflight/deploy/smoke 계약
 
-### 향후 구현 (Phase 5)
+### 배포 계약 (GitHub repository level)
 
-#### `.github/workflows/deploy-staging.yml`
+- Staging
+  - secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
+  - variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`
+- Production
+  - secrets: `PRODUCTION_DEPLOY_WEBHOOK_URL`, `PRODUCTION_DEPLOY_WEBHOOK_TOKEN`
+  - variables: `PRODUCTION_SMOKE_API_HEALTH_URL`, `PRODUCTION_SMOKE_WEB_HEALTH_URL`
 
-```yaml
-name: Deploy to Staging
+### 후속 고도화
 
-on:
-  push:
-    branches:
-      - main
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and push to ECR
-        run: |
-          docker build -t devsecops-api:staging-latest apps/api/
-          docker build -t devsecops-web:staging-latest apps/web/
-          # ECR push (aws cli)
-
-      - name: Deploy to ECS
-        run: |
-          aws ecs update-service --cluster staging --service api
-
-      - name: Smoke Test
-        run: |
-          curl -f http://staging-api.example.com/health
-
-      - name: Notify Slack
-        if: always()
-```
-
-#### `.github/workflows/deploy-production.yml`
-
-```yaml
-name: Deploy to Production
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Pre-deployment Checks
-        run: |
-          # DB migration validation
-          # Secrets validation
-          # Security scan
-
-      - name: Blue/Green Deployment
-        run: |
-          # Create new Task Definition (green)
-          # Route 10% traffic (canary)
-          # Monitor metrics
-          # Full traffic switch on success
-
-      - name: Notify on Slack
-```
+- deploy webhook 단계를 ECS/ECR/GitOps 실배포 단계로 교체
+- DB migration 검증/승인 단계 추가
+- Canary/Blue-Green 자동화 및 알림 연계
 
 ---
 

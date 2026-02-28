@@ -234,10 +234,28 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 **GitHub Actions 워크플로우:**
 - `.github/workflows/ci.yml`: 모든 push/PR 시 린트/타입체크/테스트/빌드 실행
 - `.github/workflows/security-scan.yml`: PR 시 semgrep/trivy/gitleaks 병렬 스캔
+- `.github/workflows/deploy-staging.yml`: main push(및 수동 실행) 기준 staging 배포
+  - verify 단계에서 API test/typecheck/build + Web typecheck/build 선검증
+  - preflight에서 필수 secret/variable 누락 시 **실패 대신 skip** + Step Summary 안내
+  - deploy webhook 호출 후 `infra/scripts/post-deploy-smoke-check.sh` 실행
+- `.github/workflows/deploy-production.yml`: `v*` tag push 또는 수동 실행(`confirm=DEPLOY_PROD`) 기준 production 배포
+  - staging과 동일한 verify/preflight 계약 + 수동 실행 안전장치(confirm input)
+  - 필수 구성 누락 시 **실패 대신 skip** + 명확한 사유 기록
 - `.github/actions/devsecops-scan/action.yml`: Composite Action
   - 스캔 생성 (POST /api/v1/scans)
   - 폴링으로 완료 대기 (최대 5분, 10초 간격)
   - 결과를 GitHub Step Summary에 출력
+
+**배포 워크플로우 시크릿/변수 계약:**
+- Staging
+  - secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
+  - variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`
+- Production
+  - secrets: `PRODUCTION_DEPLOY_WEBHOOK_URL`, `PRODUCTION_DEPLOY_WEBHOOK_TOKEN`
+  - variables: `PRODUCTION_SMOKE_API_HEALTH_URL`, `PRODUCTION_SMOKE_WEB_HEALTH_URL`
+- Smoke check 스크립트 계약(`infra/scripts/post-deploy-smoke-check.sh`)
+  - required: `SMOKE_API_HEALTH_URL`, `SMOKE_WEB_HEALTH_URL`
+  - optional: `SMOKE_TIMEOUT_SECONDS`, `SMOKE_RETRY_COUNT`, `SMOKE_RETRY_DELAY_SECONDS`
 
 **Webhook 환경변수:**
 - `GITHUB_WEBHOOK_SECRET`: webhook 시그니처 검증 시크릿 (선택)
@@ -312,6 +330,7 @@ pnpm --filter @devsecops/web build
 - **감사 로그 보존정책 기본값 비활성화**: 하위호환을 위해 `TENANT_AUDIT_LOG_RETENTION_DAYS`를 설정하지 않으면 감사 로그는 자동 삭제되지 않음
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
+- **DB RLS 미적용(설계 완료)**: 현재 tenant 격리는 앱 레벨 필터가 중심이며, PostgreSQL RLS 실제 적용은 `docs/architecture/TENANT_RLS_ROLLOUT.md` 계획에 따라 후속 진행 예정
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체
@@ -322,6 +341,8 @@ pnpm --filter @devsecops/web build
 
 - `docs/workflow/DECISIONS.md`: 확정 의사결정 / 미결정 / 리스크
 - `docs/architecture/AUTH_TRANSITION.md`: Header → JWT/OAuth 전환 경계/신뢰모델/롤아웃 계획
+- `docs/architecture/TENANT_RLS_ROLLOUT.md`: PostgreSQL Tenant RLS 단계적 도입 설계(세션 변수/정책/롤백 포함)
+- `docs/workflow/DEPLOYMENT.md`: staging/production 배포 전략, 체크리스트, 운영 가이드
 - `docs/workflow/PHASE3_BACKLOG.md`: Phase 3 대시보드/리포팅 구현 기록
 - `docs/workflow/PHASE4_BACKLOG.md`: Phase 4 GitHub CI/CD 연동 구현 기록
 - `docs/workflow/PHASE5_BACKLOG.md`: Phase 5 멀티테넌시/인증 기반 구현 기록

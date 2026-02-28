@@ -107,6 +107,16 @@
     - `README.md` 인증 모드/환경변수/제약 업데이트
     - `docs/architecture/AUTH_TRANSITION.md` 신규 추가(경계, trust model, rollout)
 
+- [x] Ops MVP Phase I 배포 파이프라인 구체화
+  - 신규 워크플로우: `.github/workflows/deploy-staging.yml`, `.github/workflows/deploy-production.yml`
+  - staging/prod 공통 verify 게이트(API test/typecheck/build + Web typecheck/build)
+  - 필수 secret/variable 누락 시 실패 대신 skip + Step Summary 사유 출력(기존 CI 비차단)
+  - 공통 post-deploy smoke check 계약 스크립트 추가: `infra/scripts/post-deploy-smoke-check.sh`
+
+- [x] Tenant PostgreSQL RLS 롤아웃 설계 문서화
+  - 신규 문서: `docs/architecture/TENANT_RLS_ROLLOUT.md`
+  - 포함 내용: 단계별 migration 계획, 정책 SQL 예시, 앱 세션 변수(`set_config`) 전략, 롤백 runbook
+
 ---
 
 ## 아직 남은 작업 (Phase 5 후속)
@@ -121,9 +131,11 @@
   - 플랫폼 JWT: RS256 + JWKS(`kid`) 노출, env 키 우선/미설정 시 ephemeral 키 생성 경고
 - [x] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
-- [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
+- [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
+- [ ] tenant RLS migration/role 분리 실제 적용 + staging canary 검증
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
-- [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화
+- [x] staging/prod 배포 워크플로우 초안 구현 (graceful skip + post-deploy smoke contract)
+- [ ] SaaS 인프라(IaC) 실제 리소스 프로비저닝/배포 자동화 고도화
 
 ---
 
@@ -131,4 +143,5 @@
 
 - `docs/workflow/MASTER_PLAN.md` (Phase 5 상위 목표)
 - `docs/architecture/AUTH_TRANSITION.md` (Header → JWT/OAuth 전환 설계)
-- `README.md` (현재 API 계약/환경변수)
+- `docs/architecture/TENANT_RLS_ROLLOUT.md` (Tenant RLS 단계적 도입 설계)
+- `README.md` (현재 API 계약/환경변수/배포 워크플로우 계약)

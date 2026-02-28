@@ -1,0 +1,167 @@
+name: Deploy Production
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "안전장치: DEPLOY_PROD 를 입력해야 배포 진행"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  PNPM_VERSION: "9"
+  NODE_VERSION: "20"
+
+jobs:
+  verify:
+    name: Verify before deploy (production)
+    runs-on: ubuntu-latest
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: pnpm 설치
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Node.js 설정 (pnpm 스토어 캐시 포함)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      - name: API 테스트
+        run: pnpm --filter @devsecops/api test
+
+      - name: API 타입 체크
+        run: pnpm --filter @devsecops/api typecheck
+
+      - name: API 빌드
+        run: pnpm --filter @devsecops/api build
+
+      - name: Web 타입 체크
+        run: pnpm --filter @devsecops/web typecheck
+
+      - name: Web 빌드
+        run: pnpm --filter @devsecops/web build
+
+  preflight:
+    name: Preflight checks (production)
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_ready: ${{ steps.check.outputs.deploy_ready }}
+      skip_reason: ${{ steps.check.outputs.skip_reason }}
+    steps:
+      - name: 수동 실행 확인 + 시크릿/변수 구성 확인
+        id: check
+        env:
+          CONFIRM_INPUT: ${{ github.event.inputs.confirm || '' }}
+          DEPLOY_WEBHOOK_URL: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK_TOKEN }}
+          SMOKE_API_HEALTH_URL: ${{ vars.PRODUCTION_SMOKE_API_HEALTH_URL }}
+          SMOKE_WEB_HEALTH_URL: ${{ vars.PRODUCTION_SMOKE_WEB_HEALTH_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${CONFIRM_INPUT}" != "DEPLOY_PROD" ]]; then
+            reason="Manual deploy confirmation failed. Set confirm=DEPLOY_PROD to proceed."
+            echo "deploy_ready=false" >> "$GITHUB_OUTPUT"
+            printf 'skip_reason=%s\n' "$reason" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⛔ Production deploy skipped"
+              echo "$reason"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          missing=()
+          [[ -n "${DEPLOY_WEBHOOK_URL:-}" ]] || missing+=("secret PRODUCTION_DEPLOY_WEBHOOK_URL")
+          [[ -n "${DEPLOY_WEBHOOK_TOKEN:-}" ]] || missing+=("secret PRODUCTION_DEPLOY_WEBHOOK_TOKEN")
+          [[ -n "${SMOKE_API_HEALTH_URL:-}" ]] || missing+=("variable PRODUCTION_SMOKE_API_HEALTH_URL")
+          [[ -n "${SMOKE_WEB_HEALTH_URL:-}" ]] || missing+=("variable PRODUCTION_SMOKE_WEB_HEALTH_URL")
+
+          if (( ${#missing[@]} > 0 )); then
+            reason="Missing required deploy configuration: ${missing[*]}"
+            echo "deploy_ready=false" >> "$GITHUB_OUTPUT"
+            printf 'skip_reason=%s\n' "$reason" >> "$GITHUB_OUTPUT"
+
+            {
+              echo "### ℹ️ Production deploy skipped"
+              echo "$reason"
+              echo ""
+              echo "Secrets/variables가 준비되면 다음 릴리즈부터 배포가 진행됩니다."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "deploy_ready=true" >> "$GITHUB_OUTPUT"
+          echo "skip_reason=" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs:
+      - verify
+      - preflight
+    if: needs.preflight.outputs.deploy_ready == 'true'
+    environment:
+      name: production
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 배포 웹훅 호출
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          payload="$(printf '{"environment":"production","sha":"%s","ref":"%s","actor":"%s","run_url":"%s"}' \
+            "$GITHUB_SHA" "$GITHUB_REF" "$GITHUB_ACTOR" "$run_url")"
+
+          curl --silent --show-error --fail \
+            --request POST \
+            --url "$DEPLOY_WEBHOOK_URL" \
+            --header "content-type: application/json" \
+            --header "authorization: Bearer $DEPLOY_WEBHOOK_TOKEN" \
+            --data "$payload"
+
+      - name: Post-deploy smoke check
+        env:
+          SMOKE_API_HEALTH_URL: ${{ vars.PRODUCTION_SMOKE_API_HEALTH_URL }}
+          SMOKE_WEB_HEALTH_URL: ${{ vars.PRODUCTION_SMOKE_WEB_HEALTH_URL }}
+          SMOKE_TIMEOUT_SECONDS: "20"
+          SMOKE_RETRY_COUNT: "8"
+          SMOKE_RETRY_DELAY_SECONDS: "15"
+        run: bash infra/scripts/post-deploy-smoke-check.sh
+
+  deploy-skipped:
+    name: Deploy skipped (production)
+    runs-on: ubuntu-latest
+    needs:
+      - verify
+      - preflight
+    if: needs.preflight.outputs.deploy_ready != 'true'
+    steps:
+      - name: 스킵 요약
+        run: |
+          echo "Production deployment skipped."
+          echo "Reason: ${{ needs.preflight.outputs.skip_reason }}"
