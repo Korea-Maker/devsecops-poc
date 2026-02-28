@@ -18,12 +18,12 @@
     - `x-user-role` (필수: `owner|admin|member|viewer`)
   - 역할 비교 헬퍼(`hasRoleAtLeast`) + 최소 권한 체크(`requireMinimumRole`) 제공
 
-- [x] 인증 모드 추상화 + JWT 전환 스캐폴드 추가
+- [x] 인증 모드 추상화 + JWT 실검증 구현
   - 신규 환경변수: `AUTH_MODE=header|jwt` (기본 `header`)
   - `TENANT_AUTH_MODE` 기존 계약과 완전 호환(미설정/기존 설정 동작 유지)
-  - `AUTH_MODE=jwt`에서 `Authorization: Bearer <token>` 구조 검사
-  - JWT placeholder env 추가: `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`
-  - 서명 검증 미구현 상태를 안전하게 명시(`TENANT_AUTH_JWT_NOT_IMPLEMENTED`, TODO 포함)
+  - `AUTH_MODE=jwt`에서 `Authorization: Bearer <token>` 필수화
+  - JWT env: `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`
+  - JOSE 기반 remote JWKS 서명 검증 + `iss`/`aud`/role claim 검증
 
 - [x] Scans API tenant 격리 적용
   - `POST /api/v1/scans`: tenant context의 `tenantId`를 scan 레코드에 저장
@@ -51,6 +51,14 @@
   - `GET /api/v1/organizations/:id/audit-logs?limit=50`
   - 조직 생성/멤버 생성/권한변경/멤버삭제 이벤트 적재
 
+- [x] 데이터 저장 백엔드 추상화 + PostgreSQL 영속화 (Ops MVP)
+  - 신규 환경변수: `DATA_BACKEND=memory|postgres` (기본 `memory`)
+  - `DATA_BACKEND=postgres`에서 `DATABASE_URL` 기반 연결/초기화
+  - 부팅 시 bootstrap SQL 실행(`CREATE TABLE IF NOT EXISTS`)으로 테이블 누락에도 안전 기동
+  - 부팅 hydration으로 scans/organizations/memberships/tenant audit logs를 인메모리 스토어로 복원
+  - 쓰기 경로 upsert/delete를 통해 위 4개 엔티티 영속화(기존 API 계약/응답 shape 유지)
+  - postgres 초기화 실패 시 자동 memory fallback(서비스 기동 우선)
+
 - [x] Tenant 도메인/스토어 보강
   - 파일: `apps/api/src/tenants/store.ts`
   - 기본 tenant bootstrap 유지 (`default`)
@@ -60,8 +68,8 @@
 
 - [x] 테스트/문서 갱신
   - API 테스트 추가:
-    - `AUTH_MODE` fallback/`jwt` 스캐폴드 동작
-    - JWT 모드 invalid token/header 케이스(401/503/501 계약)
+    - `AUTH_MODE` fallback + JWT 모드 필수 구성 검증
+    - JWT 모드 invalid token/header/JWKS 케이스(401/503 계약)
     - tenant 격리(list/get), queue/dead-letter admin 권한 검사
   - 문서 갱신:
     - `README.md` 인증 모드/환경변수/제약 업데이트
@@ -71,11 +79,12 @@
 
 ## 아직 남은 작업 (Phase 5 후속)
 
-- [ ] JWT 실검증 구현 (JWKS 서명 검증 + `iss/aud/exp/nbf` 검증)
 - [ ] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정
 - [ ] OAuth/OIDC 로그인 플로우(웹) 연동 및 토큰 발급 체계 연결
 - [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
-- [ ] DB 영속화 + tenant 인덱싱/행 수준 격리(RLS) 설계
+- [ ] queue/dead-letter 영속화(현재는 인메모리 유지) + 재기동 복구 전략
+- [ ] DB migration 버저닝/운영 마이그레이션 체계 정비
+- [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화
 

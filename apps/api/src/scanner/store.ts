@@ -6,6 +6,10 @@ import type {
   ScanStatus,
 } from "./types.js";
 import { DEFAULT_TENANT_ID } from "../tenants/types.js";
+import {
+  clearPersistedScans,
+  persistScanRecord,
+} from "../storage/backend.js";
 
 export type ScanFindingsSummary = Pick<
   ScanResultSummary,
@@ -41,6 +45,13 @@ interface CreateScanParams {
   tenantId?: string;
 }
 
+function cloneScanRecord(record: ScanRecord): ScanRecord {
+  return {
+    ...record,
+    findings: record.findings ? { ...record.findings } : undefined,
+  };
+}
+
 /**
  * 새로운 스캔 레코드를 생성하고 저장소에 저장합니다.
  */
@@ -62,6 +73,7 @@ export function createScan(params: CreateScanParams): ScanRecord {
     retryCount: 0,
   };
   scanStore.set(id, record);
+  persistScanRecord(record);
   return record;
 }
 
@@ -115,6 +127,7 @@ export function updateScanStatus(id: string, status: ScanStatus): ScanRecord | u
   }
 
   scanStore.set(id, next);
+  persistScanRecord(next);
   return next;
 }
 
@@ -160,7 +173,19 @@ export function updateScanMeta(
   }
 
   scanStore.set(id, next);
+  persistScanRecord(next);
   return next;
+}
+
+/**
+ * 앱 시작 시점에 외부 저장소에서 읽어온 스캔 레코드로 인메모리 스토어를 채웁니다.
+ */
+export function hydrateScanStore(records: ScanRecord[]): void {
+  scanStore.clear();
+
+  for (const record of records) {
+    scanStore.set(record.id, cloneScanRecord(record));
+  }
 }
 
 /**
@@ -168,4 +193,5 @@ export function updateScanMeta(
  */
 export function clearStore(): void {
   scanStore.clear();
+  clearPersistedScans();
 }

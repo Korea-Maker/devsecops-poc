@@ -1,4 +1,8 @@
 import { randomUUID } from "crypto";
+import {
+  clearPersistedTenantAuditLogs,
+  persistTenantAuditLog,
+} from "../storage/backend.js";
 
 export type TenantAuditAction =
   | "organization.created"
@@ -18,6 +22,13 @@ export interface TenantAuditLog {
 
 const tenantAuditLogs: TenantAuditLog[] = [];
 
+function cloneTenantAuditLog(log: TenantAuditLog): TenantAuditLog {
+  return {
+    ...log,
+    details: log.details ? { ...log.details } : undefined,
+  };
+}
+
 export function createTenantAuditLog(params: {
   organizationId: string;
   actorUserId?: string;
@@ -36,7 +47,8 @@ export function createTenantAuditLog(params: {
   };
 
   tenantAuditLogs.push(log);
-  return { ...log };
+  persistTenantAuditLog(log);
+  return cloneTenantAuditLog(log);
 }
 
 export function listTenantAuditLogs(params: {
@@ -49,9 +61,21 @@ export function listTenantAuditLogs(params: {
     .filter((log) => log.organizationId === params.organizationId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
-  return filtered.slice(0, limit).map((log) => ({ ...log }));
+  return filtered.slice(0, limit).map((log) => cloneTenantAuditLog(log));
+}
+
+/**
+ * 앱 시작 시점에 외부 저장소에서 읽어온 감사로그로 인메모리 스토어를 채웁니다.
+ */
+export function hydrateTenantAuditLogs(logs: TenantAuditLog[]): void {
+  tenantAuditLogs.length = 0;
+
+  for (const log of logs) {
+    tenantAuditLogs.push(cloneTenantAuditLog(log));
+  }
 }
 
 export function clearTenantAuditLogs(): void {
   tenantAuditLogs.length = 0;
+  clearPersistedTenantAuditLogs();
 }

@@ -5,6 +5,12 @@ import {
   type OrganizationMembership,
   type UserRole,
 } from "./types.js";
+import {
+  clearPersistedOrganizationsAndMemberships,
+  deletePersistedMembership,
+  persistMembershipRecord,
+  persistOrganizationRecord,
+} from "../storage/backend.js";
 
 interface TenantStoreError extends Error {
   code: string;
@@ -87,7 +93,15 @@ function assertOrganizationExists(organizationId: string): Organization {
   return organization;
 }
 
-function bootstrapDefaultOrganization(): void {
+function cloneOrganization(organization: Organization): Organization {
+  return { ...organization };
+}
+
+function cloneMembership(membership: OrganizationMembership): OrganizationMembership {
+  return { ...membership };
+}
+
+function bootstrapDefaultOrganization(options: { persist?: boolean } = {}): void {
   if (orgStore.has(DEFAULT_TENANT_ID)) {
     return;
   }
@@ -100,6 +114,10 @@ function bootstrapDefaultOrganization(): void {
   };
 
   orgStore.set(DEFAULT_TENANT_ID, defaultOrg);
+
+  if (options.persist ?? true) {
+    persistOrganizationRecord(defaultOrg);
+  }
 }
 
 /**
@@ -128,6 +146,7 @@ export function createOrganization(params: {
   };
 
   orgStore.set(organization.id, organization);
+  persistOrganizationRecord(organization);
   return organization;
 }
 
@@ -178,6 +197,7 @@ export function createMembership(params: {
   };
 
   membershipStore.set(key, membership);
+  persistMembershipRecord(membership);
   return membership;
 }
 
@@ -200,7 +220,7 @@ export function listMemberships(organizationId: string): OrganizationMembership[
   const memberships: OrganizationMembership[] = [];
   for (const membership of membershipStore.values()) {
     if (membership.organizationId === organizationId) {
-      memberships.push({ ...membership });
+      memberships.push(cloneMembership(membership));
     }
   }
 
@@ -216,7 +236,7 @@ export function listUserMemberships(userId: string): OrganizationMembership[] {
   const memberships: OrganizationMembership[] = [];
   for (const membership of membershipStore.values()) {
     if (membership.userId === normalizedUserId) {
-      memberships.push({ ...membership });
+      memberships.push(cloneMembership(membership));
     }
   }
 
@@ -275,7 +295,8 @@ export function removeMembership(params: {
   }
 
   membershipStore.delete(key);
-  return { ...existingMembership };
+  deletePersistedMembership(organizationId, userId);
+  return cloneMembership(existingMembership);
 }
 
 /**
@@ -320,7 +341,36 @@ export function updateMembershipRole(params: {
     updatedAt: new Date().toISOString(),
   };
   membershipStore.set(key, nextMembership);
+  persistMembershipRecord(nextMembership);
   return nextMembership;
+}
+
+/**
+ * 앱 시작 시점에 외부 저장소에서 읽어온 조직/멤버십으로 인메모리 스토어를 채웁니다.
+ */
+export function hydrateOrganizationStore(params: {
+  organizations: Organization[];
+  memberships: OrganizationMembership[];
+}): void {
+  orgStore.clear();
+  membershipStore.clear();
+
+  for (const organization of params.organizations) {
+    orgStore.set(organization.id, cloneOrganization(organization));
+  }
+
+  for (const membership of params.memberships) {
+    if (!orgStore.has(membership.organizationId)) {
+      continue;
+    }
+
+    membershipStore.set(
+      membershipKey(membership.organizationId, membership.userId),
+      cloneMembership(membership)
+    );
+  }
+
+  bootstrapDefaultOrganization();
 }
 
 /**
@@ -330,6 +380,7 @@ export function updateMembershipRole(params: {
 export function clearOrganizationStore(): void {
   orgStore.clear();
   membershipStore.clear();
+  clearPersistedOrganizationsAndMemberships();
   bootstrapDefaultOrganization();
 }
 

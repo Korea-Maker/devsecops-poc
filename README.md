@@ -111,8 +111,21 @@
 - 실패 처리: retry + exponential backoff + dead-letter 지원
 - 워커 중지 정책: `stopScanWorker()` 호출 시 pending retry timer를 모두 취소해 stop 이후 예기치 않은 재enqueue를 방지
 
+데이터 저장 백엔드:
+
+- `DATA_BACKEND`: `memory | postgres` (기본값 `memory`)
+- `DATA_BACKEND=postgres` + `DATABASE_URL` 설정 시 다음 엔티티를 PostgreSQL에 영속화
+  - scans (`retryCount`, `lastError`, `lastErrorCode`, `findings` 포함)
+  - organizations
+  - memberships
+  - tenant audit logs
+- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어를 hydrate
+- 테이블이 없어도 자동 bootstrap SQL(`CREATE TABLE IF NOT EXISTS`)을 실행해 안전하게 기동
+
 주요 스캔/테넌트 환경변수:
 
+- `DATA_BACKEND`: `memory | postgres` (기본값 `memory`)
+- `DATABASE_URL`: PostgreSQL 연결 문자열 (`DATA_BACKEND=postgres`일 때 필수)
 - `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
 - `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
@@ -236,7 +249,7 @@ pnpm --filter @devsecops/web build
 
 ## 현재 제약 사항
 
-- **인메모리 스토어**: API 서버 재시작 시 모든 스캔 데이터 소실 (PostgreSQL 연동 예정)
+- **부분 영속화 범위**: `DATA_BACKEND=postgres`에서 scans/organizations/memberships/tenant audit logs만 영속화됨 (queue/dead-letter는 아직 인메모리)
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: JWT 검증은 구현되었지만 Google SSO/OAuth 로그인(웹 세션 발급), 토큰 회전 자동화, IdP 운영 가이드는 후속 구현 필요
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
