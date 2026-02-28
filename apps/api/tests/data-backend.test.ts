@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getActiveDataBackend,
   getActiveTenantRlsMode,
+  getActiveTenantRlsRuntimeGuardMode,
   getConfiguredDataBackend,
   getConfiguredTenantRlsMode,
+  getConfiguredTenantRlsRuntimeGuardMode,
+  getPersistedScanForTenant,
   initializeDataBackend,
+  listPersistedScansForTenant,
   parseDataBackend,
   parseTenantRlsMode,
+  parseTenantRlsRuntimeGuardMode,
   persistOrganizationInviteTokenRecord,
   persistQueueState,
   resetDataBackendForTests,
@@ -17,6 +22,8 @@ const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 const ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS =
   process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
 const ORIGINAL_TENANT_RLS_MODE = process.env.TENANT_RLS_MODE;
+const ORIGINAL_TENANT_RLS_RUNTIME_GUARD_MODE =
+  process.env.TENANT_RLS_RUNTIME_GUARD_MODE;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -62,6 +69,7 @@ function createMockSqlClient(
 beforeEach(() => {
   delete process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
   delete process.env.TENANT_RLS_MODE;
+  delete process.env.TENANT_RLS_RUNTIME_GUARD_MODE;
 });
 
 afterEach(async () => {
@@ -72,6 +80,10 @@ afterEach(async () => {
     ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS
   );
   restoreEnv("TENANT_RLS_MODE", ORIGINAL_TENANT_RLS_MODE);
+  restoreEnv(
+    "TENANT_RLS_RUNTIME_GUARD_MODE",
+    ORIGINAL_TENANT_RLS_RUNTIME_GUARD_MODE
+  );
   await resetDataBackendForTests();
 });
 
@@ -103,6 +115,21 @@ describe("data backend config", () => {
 
     process.env.TENANT_RLS_MODE = "invalid-mode";
     expect(getConfiguredTenantRlsMode()).toBe("off");
+  });
+
+  it("TENANT_RLS_RUNTIME_GUARD_MODE는 off/warn/enforce를 파싱해야 한다", () => {
+    expect(parseTenantRlsRuntimeGuardMode(undefined)).toBe("off");
+    expect(parseTenantRlsRuntimeGuardMode(" warn ")).toBe("warn");
+    expect(parseTenantRlsRuntimeGuardMode("ENFORCE")).toBe("enforce");
+    expect(parseTenantRlsRuntimeGuardMode("unknown")).toBe("off");
+  });
+
+  it("TENANT_RLS_RUNTIME_GUARD_MODE 미설정/알 수 없는 값은 off로 fallback 해야 한다", () => {
+    delete process.env.TENANT_RLS_RUNTIME_GUARD_MODE;
+    expect(getConfiguredTenantRlsRuntimeGuardMode()).toBe("off");
+
+    process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "invalid-mode";
+    expect(getConfiguredTenantRlsRuntimeGuardMode()).toBe("off");
   });
 
   it("DATA_BACKEND=postgres + DATABASE_URL 누락 시 memory로 안전 fallback 해야 한다", async () => {
@@ -689,6 +716,155 @@ describe("data backend config", () => {
         "viewer-user",
       ],
     ]);
+  });
+
+  it("postgres read path는 tenant-scoped direct query + session context를 사용해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_RLS_MODE = "shadow";
+
+    const mock = createMockSqlClient((sql, values) => {
+      if (sql.includes("FROM scans") && sql.includes("WHERE tenant_id = $1")) {
+        return [
+          {
+            id: "scan-direct-list-1",
+            tenant_id: String(values?.[0] ?? "tenant-a"),
+            engine: "semgrep",
+            repo_url: "https://github.com/test/repo-direct-list",
+            branch: "main",
+            status: "queued",
+            created_at: "2026-03-01T00:00:00.000Z",
+            completed_at: null,
+            retry_count: 0,
+            last_error: null,
+            last_error_code: null,
+            findings: null,
+          },
+        ];
+      }
+
+      if (sql.includes("WHERE id = $1 AND tenant_id = $2")) {
+        return [
+          {
+            id: String(values?.[0] ?? "scan-direct-get-1"),
+            tenant_id: String(values?.[1] ?? "tenant-a"),
+            engine: "trivy",
+            repo_url: "https://github.com/test/repo-direct-get",
+            branch: "release",
+            status: "completed",
+            created_at: "2026-03-01T01:00:00.000Z",
+            completed_at: "2026-03-01T01:10:00.000Z",
+            retry_count: 1,
+            last_error: null,
+            last_error_code: null,
+            findings: {
+              totalFindings: 1,
+              critical: 0,
+              high: 1,
+              medium: 0,
+              low: 0,
+            },
+          },
+        ];
+      }
+
+      return [];
+    });
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    const scans = await listPersistedScansForTenant({
+      tenantId: "tenant-a",
+      status: "queued",
+      userId: "reader-a",
+      userRole: "member",
+    });
+
+    expect(scans).toHaveLength(1);
+    expect(scans?.[0]?.id).toBe("scan-direct-list-1");
+    expect(scans?.[0]?.tenantId).toBe("tenant-a");
+
+    const scan = await getPersistedScanForTenant({
+      scanId: "scan-direct-get-1",
+      tenantId: "tenant-a",
+      userId: "reader-a",
+      userRole: "member",
+    });
+
+    expect(scan?.id).toBe("scan-direct-get-1");
+    expect(scan?.branch).toBe("release");
+    expect(scan?.status).toBe("completed");
+
+    const contextCall = mock.query.mock.calls.find(
+      ([sql, values]) =>
+        String(sql).includes("set_config('app.tenant_id'") &&
+        Array.isArray(values) &&
+        values[0] === "tenant-a" &&
+        values[1] === "reader-a" &&
+        values[2] === "member"
+    );
+
+    expect(contextCall).toBeDefined();
+  });
+
+  it("runtime guard warn 모드에서는 unsafe tenant/service context 사용을 경고해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_RLS_MODE = "shadow";
+    process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "warn";
+
+    const warnSpy = vi.fn();
+    const mock = createMockSqlClient();
+
+    await initializeDataBackend({
+      logger: {
+        info: () => undefined,
+        warn: warnSpy,
+        error: () => undefined,
+      },
+      createSqlClient: () => mock.client,
+    });
+
+    expect(getActiveTenantRlsRuntimeGuardMode()).toBe("warn");
+
+    const scans = await listPersistedScansForTenant({
+      tenantId: "tenant-a",
+      userId: "service-reader",
+      userRole: "service",
+    });
+
+    expect(scans).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("tenant RLS runtime guard 위반")
+    );
+  });
+
+  it("runtime guard enforce 모드에서는 unsafe tenant/service context 사용을 차단해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_RLS_MODE = "enforce";
+    process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "enforce";
+
+    const mock = createMockSqlClient();
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    expect(getActiveTenantRlsRuntimeGuardMode()).toBe("enforce");
+
+    await expect(
+      getPersistedScanForTenant({
+        scanId: "scan-guard-enforce-1",
+        tenantId: "tenant-a",
+        userId: "service-reader",
+        userRole: "service",
+      })
+    ).rejects.toThrow(/tenant RLS runtime guard 위반/);
   });
 
 });

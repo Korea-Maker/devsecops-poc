@@ -157,6 +157,10 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - tenant audit logs
 - 서버 시작 시 경량 migration 버저닝(`schema_migrations`)을 기준으로 schema를 순차/멱등 적용
 - 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/retry schedule/org/membership/invite token/audit log)를 hydrate
+- request-path DB direct read pilot (Ops MVP Phase M)
+  - `GET /api/v1/scans`
+  - `GET /api/v1/scans/:id`
+  - `DATA_BACKEND=postgres`일 때 tenant-scoped PostgreSQL direct query를 우선 사용하고, memory 백엔드 계약은 그대로 유지
 - queue/dead-letter/retry snapshot 저장은 단일 PostgreSQL transaction(`BEGIN/COMMIT`)으로 수행되어 교체 중간 상태 노출을 방지
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
 - 비정상 종료 시 retry timer 대기 작업은 startup recovery에서 즉시 재적재 또는 남은 backoff로 재타이머링
@@ -165,13 +169,17 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - `off`: 기존 동작 유지 (대상 테이블 RLS DISABLE)
   - `shadow`: tenant session context 주입만 수행하고 RLS 강제는 비활성
   - `enforce`: tenant 대상 테이블(`scans`, `organizations`, `organization_memberships`, `organization_invite_tokens`, `tenant_audit_logs`)에 RLS `ENABLE + FORCE` 적용
-  - startup/hydration·retention prune 같은 시스템 경로는 `service` 컨텍스트(`app.tenant_id='*'`)로 안전하게 실행
+- `TENANT_RLS_RUNTIME_GUARD_MODE`: `off | warn | enforce` (기본값 `off`)
+  - `warn`: service/tenant context 스코프 불일치를 경고 로그로 기록
+  - `enforce`: 불일치를 예외로 차단해 runtime role separation을 강제
+  - startup/hydration·retention prune 같은 시스템 경로는 `service` 컨텍스트(`app.tenant_id='*'`)로 명시 처리
 
 주요 스캔/테넌트 환경변수:
 
 - `DATA_BACKEND`: `memory | postgres` (기본값 `memory`)
 - `DATABASE_URL`: PostgreSQL 연결 문자열 (`DATA_BACKEND=postgres`일 때 필수)
 - `TENANT_RLS_MODE`: `off | shadow | enforce` (기본값 `off`)
+- `TENANT_RLS_RUNTIME_GUARD_MODE`: `off | warn | enforce` (기본값 `off`, `enforce` 권장 시점: `TENANT_RLS_MODE=enforce`)
 - `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
 - `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
@@ -292,15 +300,18 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 1. **기본 배포(안전값)**
    - `DATA_BACKEND=postgres`
    - `TENANT_RLS_MODE=off` (default)
+   - `TENANT_RLS_RUNTIME_GUARD_MODE=off` (default)
 2. **Shadow 프리뷰**
    - `TENANT_RLS_MODE=shadow`로 배포
    - 앱은 tenant DB session context(`app.tenant_id`, `app.user_id`, `app.user_role`)를 주입하지만, RLS 강제는 하지 않음
+   - 필요 시 `TENANT_RLS_RUNTIME_GUARD_MODE=warn`으로 context scope mismatch를 선관측
    - staging에서 `infra/scripts/verify-rls-canary.sh` 결과를 확인
 3. **Enforce 전환**
-   - `TENANT_RLS_MODE=enforce`로 배포
+   - `TENANT_RLS_MODE=enforce` + `TENANT_RLS_RUNTIME_GUARD_MODE=enforce`로 배포
    - 앱 startup 시 대상 tenant 테이블에 `ALTER TABLE ... ENABLE/FORCE ROW LEVEL SECURITY` 적용
+   - runtime role separation guard가 service/tenant context misuse를 즉시 차단
 4. **즉시 롤백**
-   - `TENANT_RLS_MODE=off`로 되돌린 뒤 재배포/재시작
+   - `TENANT_RLS_MODE=off`, 필요 시 `TENANT_RLS_RUNTIME_GUARD_MODE=off`로 되돌린 뒤 재배포/재시작
    - 앱 startup 시 대상 테이블에 `NO FORCE + DISABLE ROW LEVEL SECURITY` 적용
 
 권장 점검 SQL:
@@ -397,6 +408,8 @@ pnpm --filter @devsecops/web build
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
 - **Tenant RLS는 opt-in preview 단계**: 기본값은 `TENANT_RLS_MODE=off`이며, `enforce`는 tenant 대상 영속화 테이블에 적용된다. queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지되고, startup/hydration·retention prune 경로는 `service` 컨텍스트로 동작한다.
+- **Runtime role separation guard는 opt-in hardening**: `TENANT_RLS_RUNTIME_GUARD_MODE` 기본값은 `off`, `warn`(관측), `enforce`(차단)로 단계적 적용한다.
+- **Full request-path DB direct query는 아직 진행 중**: 현재는 `GET /api/v1/scans`, `GET /api/v1/scans/:id`만 postgres direct read pilot이 적용되어 있고, 나머지 tenant read path는 후속 단계에서 점진 전환한다.
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체

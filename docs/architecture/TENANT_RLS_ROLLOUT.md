@@ -223,7 +223,7 @@ ALTER TABLE tenant_audit_logs DISABLE ROW LEVEL SECURITY;
 
 ---
 
-## 10) 산출물 상태 (Ops MVP Phase K)
+## 10) 산출물 상태 (Ops MVP Phase M)
 
 - 본 문서: **완료 (설계 + 운영 runbook 반영)**
 - DB migration 코드: **완료**
@@ -236,11 +236,17 @@ ALTER TABLE tenant_audit_logs DISABLE ROW LEVEL SECURITY;
 - 런타임 enforce 토글: **완료**
   - `TENANT_RLS_MODE=enforce`: 대상 테이블 `ENABLE + FORCE`
   - `TENANT_RLS_MODE=off|shadow`: 대상 테이블 `NO FORCE + DISABLE`
+- request-path DB direct read pilot: **완료 (1차)**
+  - `GET /api/v1/scans`, `GET /api/v1/scans/:id`가 `DATA_BACKEND=postgres`에서 tenant-scoped direct query 우선 사용
+  - memory backend 계약/응답 shape 유지
+- runtime role separation guardrails: **완료 (opt-in)**
+  - 신규 env: `TENANT_RLS_RUNTIME_GUARD_MODE=off|warn|enforce`
+  - service-context vs tenant-context scope mismatch를 `warn`(경고) 또는 `enforce`(차단)로 제어
 
 ## 11) 현재 제약/주의사항 (preview)
 
-- 현재 아키텍처는 PostgreSQL을 **영속화 계층**으로 사용하고, API read/write는 인메모리 스토어 중심으로 동작한다.
-- 따라서 RLS enforce는 tenant 대상 영속화 테이블 경계 강화 용도로 우선 적용되며,
-  queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지한다.
-- full request-path RLS(모든 조회를 DB direct query로 강제)는 후속 구조 전환 시점에 단계적으로 확장한다.
+- 현재 아키텍처는 PostgreSQL을 **영속화 계층 + 부분 read 계층**으로 사용한다.
+- request-path DB direct query는 1차 파일럿으로 scans read endpoint(`GET /api/v1/scans`, `GET /api/v1/scans/:id`)에만 적용되어 있다.
+- queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지한다.
+- full request-path RLS(모든 tenant read path의 DB direct query 강제)와 runtime guard 기본값 전환(`warn/enforce`)은 후속 단계에서 점진 확장한다.
 

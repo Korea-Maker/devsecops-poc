@@ -137,6 +137,16 @@
   - startup/hydration/retention prune는 `service` 컨텍스트로 실행(운영 안전 경로)
   - README/TENANT_RLS_ROLLOUT/PHASE5_BACKLOG 문서 및 테스트 갱신
 
+- [x] Ops MVP Phase M production hardening 1차 적용
+  - request-path DB direct read pilot
+    - `GET /api/v1/scans`, `GET /api/v1/scans/:id`가 `DATA_BACKEND=postgres`에서 tenant-scoped direct query 우선 사용
+    - memory backend 계약/응답 shape 유지
+  - runtime role separation guardrails
+    - service-context vs tenant-context 스코프 검증 가드 추가
+    - 신규 env: `TENANT_RLS_RUNTIME_GUARD_MODE=off|warn|enforce` (기본 `off`)
+    - `warn`: mismatch 경고 로그, `enforce`: mismatch 즉시 차단
+  - 관련 테스트/문서 갱신
+
 ---
 
 ## 아직 남은 작업 (Phase 5 후속)
@@ -156,7 +166,8 @@
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
 - [x] tenant RLS migration/role 분리 opt-in preview 적용 (`TENANT_RLS_MODE`)
-- [ ] full request-path DB direct query 전환 + strict runtime role 분리(후속 hardening)
+- [ ] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id` pilot 전환 완료)
+- [ ] runtime role separation guard 운영 기본값/롤아웃 정책 확정 (`TENANT_RLS_RUNTIME_GUARD_MODE` warn/enforce 전환 절차)
 - [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
 - [x] staging/prod 배포 워크플로우 초안 구현 (graceful skip + post-deploy smoke contract)

@@ -7,7 +7,11 @@ import {
   processNextScanJob,
   redriveDeadLetter,
 } from "../scanner/queue.js";
-import { createScan, getScan, listScans } from "../scanner/store.js";
+import {
+  createScan,
+  getScanForTenantReadPath,
+  listScansForTenantReadPath,
+} from "../scanner/store.js";
 import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
 import {
   getTenantAuthMode,
@@ -178,9 +182,11 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
       // 유효하지 않은 status 값은 무시하고 전체 반환
       const validStatus = isScanStatus(status) ? status : undefined;
 
-      const scans = listScans({
+      const scans = await listScansForTenantReadPath({
         tenantId: request.tenantContext.tenantId,
         status: validStatus,
+        userId: request.tenantContext.userId,
+        userRole: request.tenantContext.role,
       });
       return reply.status(200).send(scans);
     }
@@ -261,8 +267,13 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Params: { id: string } }>(
     "/api/v1/scans/:id",
     async (request, reply) => {
-      const scan = getScan(request.params.id);
-      if (!scan || scan.tenantId !== request.tenantContext.tenantId) {
+      const scan = await getScanForTenantReadPath({
+        id: request.params.id,
+        tenantId: request.tenantContext.tenantId,
+        userId: request.tenantContext.userId,
+        userRole: request.tenantContext.role,
+      });
+      if (!scan) {
         return sendError(reply, 404, "스캔을 찾을 수 없습니다", "SCAN_NOT_FOUND");
       }
       return reply.status(200).send(scan);

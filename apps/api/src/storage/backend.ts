@@ -11,6 +11,7 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export type DataBackend = "memory" | "postgres";
 export type TenantRlsMode = "off" | "shadow" | "enforce";
+export type TenantRlsRuntimeGuardMode = "off" | "warn" | "enforce";
 
 export type DataBackendInitFallbackReason =
   | "missing_database_url"
@@ -79,6 +80,25 @@ interface TenantRlsSessionContext {
   userId: string;
   userRole: TenantRlsActorRole;
 }
+
+type TenantRlsOperationScope = "service" | "tenant";
+
+export interface TenantScopedReadContext {
+  tenantId: string;
+  userId?: string;
+  userRole?: OrganizationMembership["role"] | "service";
+}
+
+export interface PersistedScanListQuery extends TenantScopedReadContext {
+  status?: ScanStatus;
+}
+
+export interface PersistedScanGetQuery extends TenantScopedReadContext {
+  scanId: string;
+}
+
+const DEFAULT_TENANT_READ_CONTEXT_USER_ID = "runtime-reader";
+const DEFAULT_TENANT_READ_CONTEXT_ROLE: OrganizationMembership["role"] = "viewer";
 
 const SYSTEM_TENANT_RLS_CONTEXT: TenantRlsSessionContext = {
   tenantId: "*",
@@ -169,6 +189,7 @@ interface ScanRetryScheduleRow extends QueryResultRow {
 
 let activeBackend: DataBackend = "memory";
 let activeTenantRlsMode: TenantRlsMode = "off";
+let activeTenantRlsRuntimeGuardMode: TenantRlsRuntimeGuardMode = "off";
 let sqlClient: SqlClient | null = null;
 let initPromise: Promise<DataBackendInitResult> | null = null;
 let persistenceTaskQueue: Promise<void> = Promise.resolve();
@@ -268,6 +289,41 @@ export function getActiveTenantRlsMode(): TenantRlsMode {
   return activeTenantRlsMode;
 }
 
+function normalizeTenantRlsRuntimeGuardMode(
+  rawValue: string | undefined
+): TenantRlsRuntimeGuardMode {
+  if (!rawValue) {
+    return "off";
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (normalized === "warn") {
+    return "warn";
+  }
+
+  if (normalized === "enforce") {
+    return "enforce";
+  }
+
+  return "off";
+}
+
+export function parseTenantRlsRuntimeGuardMode(
+  rawValue: string | undefined
+): TenantRlsRuntimeGuardMode {
+  return normalizeTenantRlsRuntimeGuardMode(rawValue);
+}
+
+export function getConfiguredTenantRlsRuntimeGuardMode(): TenantRlsRuntimeGuardMode {
+  return normalizeTenantRlsRuntimeGuardMode(
+    readTrimmedEnv("TENANT_RLS_RUNTIME_GUARD_MODE")
+  );
+}
+
+export function getActiveTenantRlsRuntimeGuardMode(): TenantRlsRuntimeGuardMode {
+  return activeTenantRlsRuntimeGuardMode;
+}
+
 export function getDatabaseUrl(): string | undefined {
   return readTrimmedEnv("DATABASE_URL");
 }
@@ -308,6 +364,83 @@ function createTenantRlsContextForTenant(tenantId: string): TenantRlsSessionCont
     userId: "storage-worker",
     userRole: "owner",
   });
+}
+
+function createTenantRlsContextForRead(context: TenantScopedReadContext): TenantRlsSessionContext {
+  const normalizedTenantId = context.tenantId.trim();
+  const normalizedUserId = context.userId?.trim();
+
+  return normalizeTenantRlsSessionContext({
+    tenantId: normalizedTenantId.length > 0 ? normalizedTenantId : DEFAULT_TENANT_ID,
+    userId:
+      normalizedUserId && normalizedUserId.length > 0
+        ? normalizedUserId
+        : DEFAULT_TENANT_READ_CONTEXT_USER_ID,
+    userRole: context.userRole ?? DEFAULT_TENANT_READ_CONTEXT_ROLE,
+  });
+}
+
+function isServiceTenantRlsContext(context: TenantRlsSessionContext): boolean {
+  return (
+    context.userRole === SYSTEM_TENANT_RLS_CONTEXT.userRole ||
+    context.tenantId === SYSTEM_TENANT_RLS_CONTEXT.tenantId
+  );
+}
+
+function describeTenantRlsScopeMismatch(
+  expectedScope: TenantRlsOperationScope,
+  context: TenantRlsSessionContext
+): string | null {
+  const serviceContext = isServiceTenantRlsContext(context);
+
+  if (expectedScope === "service") {
+    if (serviceContext) {
+      return null;
+    }
+
+    return `service 컨텍스트가 필요하지만 tenant 컨텍스트가 전달되었습니다 (tenantId=${context.tenantId}, userId=${context.userId}, userRole=${context.userRole})`;
+  }
+
+  if (!serviceContext) {
+    return null;
+  }
+
+  return `tenant 컨텍스트가 필요하지만 service 컨텍스트가 전달되었습니다 (tenantId=${context.tenantId}, userId=${context.userId}, userRole=${context.userRole})`;
+}
+
+function resolveTenantRlsRuntimeGuardMode(mode: TenantRlsMode): TenantRlsRuntimeGuardMode {
+  if (!isTenantRlsContextEnabled(mode)) {
+    return "off";
+  }
+
+  return activeTenantRlsRuntimeGuardMode;
+}
+
+function guardTenantRlsContextScope(
+  transactionName: string,
+  expectedScope: TenantRlsOperationScope,
+  context: TenantRlsSessionContext,
+  mode: TenantRlsMode
+): void {
+  const guardMode = resolveTenantRlsRuntimeGuardMode(mode);
+  if (guardMode === "off") {
+    return;
+  }
+
+  const mismatchReason = describeTenantRlsScopeMismatch(expectedScope, context);
+  if (!mismatchReason) {
+    return;
+  }
+
+  const message = `[storage] tenant RLS runtime guard 위반 (${transactionName}): ${mismatchReason}`;
+
+  if (guardMode === "warn") {
+    warn(message);
+    return;
+  }
+
+  error(message);
+  throw new Error(message);
 }
 
 function readAuditLogRetentionDays(): number | undefined {
@@ -1123,6 +1256,128 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
   };
 }
 
+async function waitForPersistenceQueueDrain(): Promise<void> {
+  try {
+    await persistenceTaskQueue;
+  } catch {
+    // schedulePersistenceTask에서 이미 로깅하므로 추가 처리하지 않습니다.
+  }
+}
+
+export async function listPersistedScansForTenant(
+  query: PersistedScanListQuery
+): Promise<ScanRecord[] | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const tenantRlsContext = createTenantRlsContextForRead(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "listPersistedScansForTenant",
+    tenantRlsContext,
+    async () => {
+      const whereClauses = ["tenant_id = $1"];
+      const values: unknown[] = [tenantRlsContext.tenantId];
+
+      if (query.status) {
+        values.push(query.status);
+        whereClauses.push(`status = $${values.length}`);
+      }
+
+      const result = await client.query<ScanRow>(
+        `
+          SELECT
+            id,
+            tenant_id,
+            engine,
+            repo_url,
+            branch,
+            status,
+            created_at,
+            completed_at,
+            retry_count,
+            last_error,
+            last_error_code,
+            findings
+          FROM scans
+          WHERE ${whereClauses.join(" AND ")}
+          ORDER BY created_at ASC
+        `,
+        values
+      );
+
+      return result.rows.map(mapScanRowToRecord);
+    },
+    activeTenantRlsMode,
+    "tenant"
+  );
+}
+
+export async function getPersistedScanForTenant(
+  query: PersistedScanGetQuery
+): Promise<ScanRecord | undefined | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  const normalizedScanId = query.scanId.trim();
+  if (normalizedScanId.length === 0) {
+    return undefined;
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const tenantRlsContext = createTenantRlsContextForRead(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "getPersistedScanForTenant",
+    tenantRlsContext,
+    async () => {
+      const result = await client.query<ScanRow>(
+        `
+          SELECT
+            id,
+            tenant_id,
+            engine,
+            repo_url,
+            branch,
+            status,
+            created_at,
+            completed_at,
+            retry_count,
+            last_error,
+            last_error_code,
+            findings
+          FROM scans
+          WHERE id = $1 AND tenant_id = $2
+          LIMIT 1
+        `,
+        [normalizedScanId, tenantRlsContext.tenantId]
+      );
+
+      const row = result.rows[0];
+      return row ? mapScanRowToRecord(row) : undefined;
+    },
+    activeTenantRlsMode,
+    "tenant"
+  );
+}
+
 export async function initializeDataBackend(
   options: InitializeDataBackendOptions = {}
 ): Promise<DataBackendInitResult> {
@@ -1135,8 +1390,10 @@ export async function initializeDataBackend(
   initPromise = (async (): Promise<DataBackendInitResult> => {
     const configuredBackend = getConfiguredDataBackend();
     const configuredTenantRlsMode = getConfiguredTenantRlsMode();
+    const configuredTenantRlsRuntimeGuardMode = getConfiguredTenantRlsRuntimeGuardMode();
     activeBackend = "memory";
     activeTenantRlsMode = "off";
+    activeTenantRlsRuntimeGuardMode = "off";
 
     if (configuredBackend !== "postgres") {
       return {
@@ -1183,13 +1440,15 @@ export async function initializeDataBackend(
             persistedState,
           };
         },
-        configuredTenantRlsMode
+        configuredTenantRlsMode,
+        "service"
       );
 
       sqlClient = postgresClient;
       candidateClient = null;
       activeBackend = "postgres";
       activeTenantRlsMode = configuredTenantRlsMode;
+      activeTenantRlsRuntimeGuardMode = configuredTenantRlsRuntimeGuardMode;
       info(
         "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, invites=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, retrySchedules=%d, recoveredRunning=%d, tenantRlsMode=%s)",
         persistedState.scans.length,
@@ -1216,6 +1475,7 @@ export async function initializeDataBackend(
       );
       activeBackend = "memory";
       activeTenantRlsMode = "off";
+      activeTenantRlsRuntimeGuardMode = "off";
 
       if (candidateClient) {
         try {
@@ -1298,13 +1558,15 @@ async function runWithTenantRlsContext<T>(
   transactionName: string,
   context: Partial<TenantRlsSessionContext> | undefined,
   task: () => Promise<T>,
-  mode: TenantRlsMode = activeTenantRlsMode
+  mode: TenantRlsMode = activeTenantRlsMode,
+  expectedScope: TenantRlsOperationScope = "tenant"
 ): Promise<T> {
+  const normalizedContext = normalizeTenantRlsSessionContext(context);
+  guardTenantRlsContextScope(transactionName, expectedScope, normalizedContext, mode);
+
   if (!isTenantRlsContextEnabled(mode)) {
     return task();
   }
-
-  const normalizedContext = normalizeTenantRlsSessionContext(context);
 
   return runInTransaction(client, `tenantRls:${transactionName}`, async () => {
     await applyTenantRlsSessionContext(client, normalizedContext);
@@ -1393,7 +1655,9 @@ export function clearPersistedScans(): void {
       SYSTEM_TENANT_RLS_CONTEXT,
       async () => {
         await client.query("DELETE FROM scans");
-      }
+      },
+      activeTenantRlsMode,
+      "service"
     );
   });
 }
@@ -1629,7 +1893,9 @@ export function clearPersistedOrganizationsAndMemberships(): void {
               null,
             ]
           );
-        }
+        },
+        activeTenantRlsMode,
+        "service"
       );
     }
   );
@@ -1701,7 +1967,9 @@ export function prunePersistedTenantAuditLogs(cutoffIso: string): void {
           `,
           [normalizedCutoffIso]
         );
-      }
+      },
+      activeTenantRlsMode,
+      "service"
     );
   });
 }
@@ -1714,7 +1982,9 @@ export function clearPersistedTenantAuditLogs(): void {
       SYSTEM_TENANT_RLS_CONTEXT,
       async () => {
         await client.query("DELETE FROM tenant_audit_logs");
-      }
+      },
+      activeTenantRlsMode,
+      "service"
     );
   });
 }
@@ -1730,6 +2000,7 @@ export async function shutdownDataBackend(): Promise<void> {
 
   activeBackend = "memory";
   activeTenantRlsMode = "off";
+  activeTenantRlsRuntimeGuardMode = "off";
   initPromise = null;
   persistenceTaskQueue = Promise.resolve();
 }

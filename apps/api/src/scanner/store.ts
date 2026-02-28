@@ -5,9 +5,12 @@ import type {
   ScanResultSummary,
   ScanStatus,
 } from "./types.js";
-import { DEFAULT_TENANT_ID } from "../tenants/types.js";
+import { DEFAULT_TENANT_ID, type UserRole } from "../tenants/types.js";
 import {
   clearPersistedScans,
+  getActiveDataBackend,
+  getPersistedScanForTenant,
+  listPersistedScansForTenant,
   persistScanRecord,
 } from "../storage/backend.js";
 
@@ -103,6 +106,68 @@ export function listScans(filter?: ListScansFilter): ScanRecord[] {
     all = all.filter((r) => r.status === filter.status);
   }
   return all;
+}
+
+interface TenantScopedScanReadOptions {
+  tenantId: string;
+  userId?: string;
+  userRole?: UserRole;
+}
+
+/**
+ * 요청 경로 read 최적화:
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 스토어를 사용
+ */
+export async function listScansForTenantReadPath(
+  filter: TenantScopedScanReadOptions & { status?: ScanStatus }
+): Promise<ScanRecord[]> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedScans = await listPersistedScansForTenant({
+      tenantId: filter.tenantId,
+      status: filter.status,
+      userId: filter.userId,
+      userRole: filter.userRole,
+    });
+
+    if (persistedScans) {
+      return persistedScans;
+    }
+  }
+
+  return listScans({
+    tenantId: filter.tenantId,
+    status: filter.status,
+  });
+}
+
+/**
+ * 요청 경로 read 최적화:
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 스토어를 사용
+ */
+export async function getScanForTenantReadPath(
+  params: TenantScopedScanReadOptions & { id: string }
+): Promise<ScanRecord | undefined> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedScan = await getPersistedScanForTenant({
+      scanId: params.id,
+      tenantId: params.tenantId,
+      userId: params.userId,
+      userRole: params.userRole,
+    });
+
+    if (persistedScan !== null) {
+      return persistedScan;
+    }
+  }
+
+  const scan = getScan(params.id);
+  if (!scan || scan.tenantId !== params.tenantId) {
+    return undefined;
+  }
+
+  return scan;
 }
 
 /**
