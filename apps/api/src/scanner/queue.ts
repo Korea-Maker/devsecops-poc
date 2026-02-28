@@ -132,6 +132,31 @@ function matchesTenantFilter(scanId: string, filter?: QueueTenantFilter): boolea
   return scan?.tenantId === filter.tenantId;
 }
 
+function dequeueNextScanId(filter?: QueueTenantFilter): string | undefined {
+  if (!filter?.tenantId) {
+    return scanJobQueue.shift();
+  }
+
+  const targetIndex = scanJobQueue.findIndex((scanId) =>
+    matchesTenantFilter(scanId, filter)
+  );
+
+  if (targetIndex < 0) {
+    return undefined;
+  }
+
+  const [scanId] = scanJobQueue.splice(targetIndex, 1);
+  return scanId;
+}
+
+function isTenantScopedProcessingBusy(filter?: QueueTenantFilter): boolean {
+  if (!isProcessing || processingScanId === null) {
+    return false;
+  }
+
+  return matchesTenantFilter(processingScanId, filter);
+}
+
 /**
  * 스캔 작업을 큐에 추가합니다.
  */
@@ -349,12 +374,21 @@ export function getQueueStatus(filter?: QueueTenantFilter): ScanQueueStatus {
  * - busy: 이미 다른 작업을 처리 중인 상태
  * - empty: 처리할 작업이 없는 상태
  */
-export async function processNextScanJob(): Promise<ProcessNextScanJobResult> {
+export async function processNextScanJob(
+  filter?: QueueTenantFilter
+): Promise<ProcessNextScanJobResult> {
   if (isProcessing) {
+    if (filter?.tenantId) {
+      return {
+        processed: false,
+        busy: isTenantScopedProcessingBusy(filter),
+      };
+    }
+
     return { processed: false, busy: true };
   }
 
-  const scanId = scanJobQueue.shift();
+  const scanId = dequeueNextScanId(filter);
   if (!scanId) {
     return { processed: false, busy: false };
   }

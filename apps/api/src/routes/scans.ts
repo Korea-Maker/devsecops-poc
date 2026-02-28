@@ -196,9 +196,13 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /** POST /api/v1/scans/queue/process-next — 즉시 다음 작업 1건 처리 트리거 */
-  app.post("/api/v1/scans/queue/process-next", async (_request, reply) => {
+  app.post("/api/v1/scans/queue/process-next", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "admin")) {
+      return;
+    }
+
     try {
-      const processResult = await processNextScanJob();
+      const processResult = await processNextScanJob(getOptionalTenantFilter(request));
       return reply.status(200).send(processResult);
     } catch (error) {
       app.log.error(error, "[scans] queue/process-next 처리 실패");

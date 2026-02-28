@@ -68,9 +68,10 @@
   - 응답: `{ queuedJobs, deadLetters, pendingRetryTimers, workerRunning, processing }`
   - `TENANT_AUTH_MODE=required`에서 `admin` 이상 권한 필요 + tenant 필터 적용
 - `POST /api/v1/scans/queue/process-next` → 워커와 별개로 즉시 다음 작업 1건 처리
+  - `TENANT_AUTH_MODE=required`에서 `admin` 이상 권한 필요 + 요청 tenant 대기 작업만 처리
   - 응답: `{ processed: boolean, busy: boolean }`
     - `processed=false, busy=false`: 처리할 작업 없음(empty)
-    - `processed=false, busy=true`: 이미 다른 작업 처리 중(busy)
+    - `processed=false, busy=true`: 같은 tenant 작업이 이미 처리 중(busy)
 
 오류 응답 계약(scans 라우트):
 
@@ -85,7 +86,7 @@
   - `x-user-id` (필수)
   - `x-user-role` (필수, `owner | admin | member | viewer`)
 - `required` 모드에서 누락/형식 오류 시 4xx + `{ error, code }` 반환
-- queue/dead-letter 관리 API는 `admin` 이상(role hierarchy: `owner > admin > member > viewer`)만 접근 가능
+- queue/dead-letter 수동 운영 API(`queue/status`, `queue/process-next`, `dead-letters`, `redrive`)는 `admin` 이상(role hierarchy: `owner > admin > member > viewer`)만 접근 가능
 
 스캔 워커 동작:
 

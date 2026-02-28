@@ -777,6 +777,14 @@ describe("Scans API", () => {
       expect(queueStatusRes.statusCode).toBe(403);
       expect(queueStatusRes.json().code).toBe("TENANT_FORBIDDEN");
 
+      const processNextRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+        headers: memberHeaders,
+      });
+      expect(processNextRes.statusCode).toBe(403);
+      expect(processNextRes.json().code).toBe("TENANT_FORBIDDEN");
+
       const deadLettersRes = await app.inject({
         method: "GET",
         url: "/api/v1/scans/dead-letters",
@@ -866,6 +874,131 @@ describe("Scans API", () => {
       });
       expect(deadLettersAfterRedrive.statusCode).toBe(200);
       expect(deadLettersAfterRedrive.json()).toHaveLength(0);
+    });
+
+    it("admin 수동 처리(process-next)는 요청 tenant의 대기 작업만 1건 처리해야 한다", async () => {
+      const tenantAHeaders = buildTenantHeaders({
+        tenantId: "tenant-manual-a",
+        userId: "admin-manual-a",
+        role: "admin",
+      });
+      const tenantBHeaders = buildTenantHeaders({
+        tenantId: "tenant-manual-b",
+        userId: "admin-manual-b",
+        role: "admin",
+      });
+
+      // 의도적으로 B를 먼저 enqueue해도, A 요청에서는 A 작업만 처리되어야 한다.
+      const createResB = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantBHeaders,
+        payload: { engine: "trivy", repoUrl: "https://github.com/test/repo-manual-b" },
+      });
+      const createResA = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantAHeaders,
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-manual-a" },
+      });
+
+      const scanIdB = createResB.json().scanId as string;
+      const scanIdA = createResA.json().scanId as string;
+
+      const processResA = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+        headers: tenantAHeaders,
+      });
+      expect(processResA.statusCode).toBe(200);
+      expect(processResA.json()).toEqual({ processed: true, busy: false });
+
+      const getResA = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanIdA}`,
+        headers: tenantAHeaders,
+      });
+      expect(getResA.statusCode).toBe(200);
+      expect(getResA.json().status).toBe("completed");
+
+      const getResB = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanIdB}`,
+        headers: tenantBHeaders,
+      });
+      expect(getResB.statusCode).toBe(200);
+      expect(getResB.json().status).toBe("queued");
+    });
+
+    it("다른 tenant 작업이 처리 중이면 process-next는 busy=false로 노출을 마스킹해야 한다", async () => {
+      const tenantAHeaders = buildTenantHeaders({
+        tenantId: "tenant-busy-mask-a",
+        userId: "admin-busy-mask-a",
+        role: "admin",
+      });
+      const tenantBHeaders = buildTenantHeaders({
+        tenantId: "tenant-busy-mask-b",
+        userId: "admin-busy-mask-b",
+        role: "admin",
+      });
+
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantBHeaders,
+        payload: { engine: "trivy", repoUrl: "https://github.com/test/repo-busy-mask-b" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantAHeaders,
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-busy-mask-a" },
+      });
+
+      vi.useFakeTimers();
+      const inFlightTenantB = processNextScanJob({ tenantId: "tenant-busy-mask-b" });
+
+      const processResA = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+        headers: tenantAHeaders,
+      });
+
+      expect(processResA.statusCode).toBe(200);
+      expect(processResA.json()).toEqual({ processed: false, busy: false });
+
+      await vi.advanceTimersByTimeAsync(40);
+      await inFlightTenantB;
+    });
+
+    it("같은 tenant 작업이 처리 중이면 process-next는 busy=true를 반환해야 한다", async () => {
+      const tenantAHeaders = buildTenantHeaders({
+        tenantId: "tenant-busy-same-a",
+        userId: "admin-busy-same-a",
+        role: "admin",
+      });
+
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantAHeaders,
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-busy-same-a" },
+      });
+
+      vi.useFakeTimers();
+      const inFlightTenantA = processNextScanJob({ tenantId: "tenant-busy-same-a" });
+
+      const processResA = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans/queue/process-next",
+        headers: tenantAHeaders,
+      });
+
+      expect(processResA.statusCode).toBe(200);
+      expect(processResA.json()).toEqual({ processed: false, busy: true });
+
+      await vi.advanceTimersByTimeAsync(40);
+      await inFlightTenantA;
     });
   });
 });

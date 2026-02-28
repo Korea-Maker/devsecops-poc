@@ -23,11 +23,13 @@
   - `GET /api/v1/scans`: 요청 tenant 스캔만 반환 (`status` 필터 유지)
   - `GET /api/v1/scans/:id`: 타 tenant 스캔 접근 시 `404`
 
-- [x] Queue/Dead-letter endpoint tenant 누수 방지(실용적 필터)
+- [x] Queue/Dead-letter 수동 운영 API tenant 누수 방지(실용적 필터)
   - `GET /api/v1/scans/queue/status`: tenant 필터 기반 집계 지원
+  - `POST /api/v1/scans/queue/process-next`: 요청 tenant 대기 작업만 1건 처리
+    - 다른 tenant 작업이 처리 중일 때는 `busy=false`로 마스킹
   - `GET /api/v1/scans/dead-letters`: tenant 범위만 반환
   - `POST /api/v1/scans/:id/redrive`: 타 tenant 항목은 `not_found` 처리
-  - `TENANT_AUTH_MODE=required`일 때 위 3개 endpoint는 `admin` 이상 권한 필요
+  - `TENANT_AUTH_MODE=required`일 때 위 4개 endpoint는 `admin` 이상 권한 필요
   - `TENANT_AUTH_MODE=disabled`에서는 기존 동작 유지
 
 - [x] Tenant 도메인/스토어 보강
@@ -50,7 +52,6 @@
 
 - [ ] 실제 인증 체계 연동 (JWT/OAuth/SSO) 및 헤더 신뢰 경계 정립
 - [ ] 조직/멤버십 CRUD API (org 생성, 멤버 초대/역할 변경)
-- [ ] queue/process-next tenant 정책 정리 (tenant 단위 수동 처리 전략)
 - [ ] DB 영속화 + tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그(누가 어떤 tenant 리소스에 접근/재처리했는지)
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화
