@@ -32,6 +32,13 @@
   - `TENANT_AUTH_MODE=required`일 때 위 4개 endpoint는 `admin` 이상 권한 필요
   - `TENANT_AUTH_MODE=disabled`에서는 기존 동작 유지
 
+- [x] Organization/Membership CRUD 초안 구현 (인메모리)
+  - `GET/POST /api/v1/organizations`
+  - `GET /api/v1/organizations/:id`
+  - `GET/POST /api/v1/organizations/:id/memberships`
+  - `PATCH /api/v1/organizations/:id/memberships/:userId`
+  - `required` 모드에서 tenant scope + admin 권한 가드 적용
+
 - [x] Tenant 도메인/스토어 보강
   - 파일: `apps/api/src/tenants/store.ts`
   - 기본 tenant bootstrap 유지 (`default`)
@@ -51,7 +58,7 @@
 ## 아직 남은 작업 (Phase 5 후속)
 
 - [ ] 실제 인증 체계 연동 (JWT/OAuth/SSO) 및 헤더 신뢰 경계 정립
-- [ ] 조직/멤버십 CRUD API (org 생성, 멤버 초대/역할 변경)
+- [ ] 조직/멤버십 API 고도화 (삭제/초대 토큰/페이지네이션/감사로그)
 - [ ] DB 영속화 + tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그(누가 어떤 tenant 리소스에 접근/재처리했는지)
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화

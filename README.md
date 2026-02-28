@@ -116,6 +116,19 @@ curl -s http://localhost:3001/api/v1/scans/queue/status
 curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 ```
 
+### Tenant 관리 API (Phase 5 초안)
+
+- `GET /api/v1/organizations` → 조직 목록 조회
+  - `TENANT_AUTH_MODE=required`에서는 요청 tenant 1개만 반환
+- `POST /api/v1/organizations` → 조직 생성 (`admin` 이상)
+  - `required` 모드에서 생성자 owner 멤버십 자동 생성
+- `GET /api/v1/organizations/:id` → 단일 조직 조회 (tenant scope 강제)
+- `GET /api/v1/organizations/:id/memberships` → 조직 멤버십 조회 (`admin` 이상)
+- `POST /api/v1/organizations/:id/memberships` → 조직 멤버 추가 (`admin` 이상)
+- `PATCH /api/v1/organizations/:id/memberships/:userId` → 멤버 역할 수정 (`admin` 이상)
+
+오류 응답 shape는 scans API와 동일하게 `{ error, code? }`를 사용한다.
+
 ### GitHub CI/CD 연동 (`apps/api` + GitHub Actions)
 
 - `POST /api/v1/github/webhook` → GitHub webhook 수신 + 스캔 트리거 (`202 Accepted`)
