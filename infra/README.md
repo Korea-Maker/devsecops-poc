@@ -5,10 +5,10 @@
 DevSecOps PoC의 운영 환경 인프라 정의 및 배포 자동화.
 
 - **클라우드 대상**: AWS (우선), GCP/Azure (차선)
-- **IaC 도구**: Terraform (구현 예정)
+- **IaC 도구**: Terraform (safe-by-default skeleton 적용)
 - **컨테이너**: Docker, Docker Compose (개발/staging)
 - **오케스트레이션**: ECS/EKS (프로덕션, 향후 구현)
-- **환경 분리**: development, staging, production
+- **환경 분리**: dev, staging, prod
 
 ---
 
@@ -139,24 +139,53 @@ DevSecOps PoC의 운영 환경 인프라 정의 및 배포 자동화.
 
 ```
 infra/terraform/
-├── main.tf              # AWS provider + 리소스 정의
-├── variables.tf         # 입력 변수 (environment, region 등)
-├── outputs.tf           # 출력값 (ALB DNS, RDS endpoint 등)
-├── terraform.tfvars     # 변수값 파일 (실제 값은 .gitignore)
+├── main.tf                       # provider + module wiring + safety checks
+├── variables.tf                  # 입력 변수 + validation
+├── outputs.tf                    # 모듈 출력값
+├── README.md                     # Terraform 실행 가이드
 ├── modules/
-│   ├── vpc/             # VPC 모듈
-│   ├── rds/             # RDS 모듈
-│   ├── ecs/             # ECS 모듈
-│   └── s3/              # S3 모듈
-└── environments/
-    ├── dev.tfvars       # 개발 환경 변수
-    ├── staging.tfvars   # staging 환경 변수
-    └── prod.tfvars      # 프로덕션 환경 변수
+│   ├── vpc/                      # VPC/Subnet/RT/NAT skeleton
+│   ├── rds/                      # PostgreSQL RDS skeleton
+│   ├── ecs/                      # ECS Cluster/ALB skeleton
+│   └── s3/                       # Artifacts/Logs bucket skeleton
+├── environments/
+│   ├── dev.tfvars               # dev 환경 예시 변수
+│   ├── staging.tfvars           # staging 환경 예시 변수
+│   └── prod.tfvars              # prod 환경 예시 변수
+└── plans/                        # 로컬 plan 출력 경로 (git ignore)
 ```
 
-### 향후 구현 (Placeholder)
+### 현재 구현 범위 (Ops MVP Phase O)
 
-현재 `main.tf`와 `variables.tf`는 골격만 정의되어 있으며, 실제 리소스 구현은 Phase 5 이후 진행됩니다.
+- `vpc/rds/ecs/s3` 모듈 최소 리소스 skeleton 추가
+- 모든 모듈은 `enabled=false` 기본값(비활성)
+- 루트에서 `allow_resource_creation=false` 기본값(전역 생성 금지)
+- `check` 블록 기반 선행조건 검증(모듈 의존성/스토리지 범위/스냅샷 설정)
+- tfvars 샘플(dev/staging/prod) 추가
+
+### Terraform 실행 플로우 (정확한 절차)
+
+```bash
+# 0) Terraform 구조 검증 (포맷+validate)
+terraform -chdir=infra/terraform fmt -recursive
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform validate
+
+# 1) 안전 모드 plan (기본: 리소스 생성 없음)
+bash infra/scripts/terraform-plan.sh staging
+
+# 2) 생성 포함 plan (명시적 --allow-create 필요)
+bash infra/scripts/terraform-plan.sh staging --allow-create
+
+# 3) apply (대화형 확인)
+bash infra/scripts/terraform-apply.sh staging --allow-create
+
+# 4) prod apply (추가 보호장치)
+bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
+```
+
+> CI에서는 apply를 절대 실행하지 않고, PR에서 fmt/validate/plan(안전 모드)만 수행한다.
+
 
 ---
 

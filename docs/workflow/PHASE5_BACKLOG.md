@@ -155,6 +155,16 @@
   - DB query 레이어에서 tenant scope 조건을 명시적으로 강제하고 runtime guard 모드(`TENANT_RLS_RUNTIME_GUARD_MODE`)와 정합 유지
   - read path 선택 + tenant 필터링 검증 테스트 및 README/백로그 문서 갱신
 
+- [x] Ops MVP Phase O SaaS 인프라 자동화 하드닝 1차 적용
+  - Terraform 모듈 skeleton 추가: `infra/terraform/modules/{vpc,rds,ecs,s3}`
+  - 안전 기본값 적용: `allow_resource_creation=false` + module toggle(`enable_*`) 기본 false
+  - 환경별 tfvars 샘플 추가: `infra/terraform/environments/{dev,staging,prod}.tfvars`
+  - helper script 추가: `infra/scripts/terraform-plan.sh`, `infra/scripts/terraform-apply.sh`
+    - 환경 인자 필수, apply 대화형 확인, prod apply는 `--allow-prod` 없으면 거부
+  - PR IaC 검증 워크플로우 추가: `.github/workflows/terraform-pr-checks.yml`
+    - fmt/validate/plan(no-apply), terraform/AWS creds 누락 시 skip-safe
+
+
 ---
 
 ## 아직 남은 작업 (Phase 5 후속)

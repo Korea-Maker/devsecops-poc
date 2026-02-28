@@ -2,7 +2,7 @@
 
 ## 개요
 
-DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke + staging optional RLS canary)은 반영되었고, 클라우드 인프라(ECS/ECR/Terraform 리소스)는 후속 고도화 대상으로 남아 있다.
+DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke + staging optional RLS canary)은 반영되었고, Terraform IaC는 safe-by-default skeleton(vpc/rds/ecs/s3 + tfvars + guard script + PR plan workflow)까지 적용된 상태다.
 
 ---
 
@@ -207,6 +207,11 @@ aws ecs describe-services \
 - `deploy-production.yml`:
   - 트리거: `v*` tag push + 수동 실행(`confirm=DEPLOY_PROD`)
   - staging과 동일한 verify/preflight/deploy/smoke 계약
+- `terraform-pr-checks.yml`:
+  - 트리거: PR (`infra/terraform/**`, `infra/scripts/terraform-*.sh`, workflow 파일 변경)
+  - `terraform fmt -check` + `validate` 수행
+  - `plan`은 `allow_resource_creation=false` 안전 모드로만 실행
+  - terraform binary/AWS creds 누락 시 실패 대신 skip + Step Summary 기록
 
 ### 배포 계약 (GitHub repository level)
 
@@ -228,6 +233,33 @@ aws ecs describe-services \
   - probe 권장값: tenant A 전용 read-only GET 경로 (예: `/api/v1/scans/<tenant-a-scan-id>`)
   - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
   - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
+- Terraform 스크립트 계약
+  - `infra/scripts/terraform-plan.sh <env>`: `dev|staging|prod` 환경 인자 필수
+  - `infra/scripts/terraform-plan.sh <env> --allow-create`: 명시적으로 create plan 허용
+  - `infra/scripts/terraform-apply.sh <env>`: apply 전 대화형 확인
+  - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 즉시 거부
+
+
+### Terraform IaC 실행 절차 (safe-by-default)
+
+```bash
+# 1) 포맷/검증
+terraform -chdir=infra/terraform fmt -recursive
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform validate
+
+# 2) 안전 모드 plan (기본)
+bash infra/scripts/terraform-plan.sh staging
+
+# 3) 생성 포함 plan/apply (명시적으로만)
+bash infra/scripts/terraform-plan.sh staging --allow-create
+bash infra/scripts/terraform-apply.sh staging --allow-create
+
+# 4) production apply (추가 플래그 + 확인 문자열)
+bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
+```
+
+> CI에서는 apply를 실행하지 않고, PR에서 fmt/validate/plan(안전 모드)만 수행한다.
 
 ### 운영/실서비스 MVP complete 판정 조건 (현재)
 

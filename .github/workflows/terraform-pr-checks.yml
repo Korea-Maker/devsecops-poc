@@ -1,0 +1,88 @@
+name: Terraform PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "infra/terraform/**"
+      - "infra/scripts/terraform-*.sh"
+      - ".github/workflows/terraform-pr-checks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-checks:
+    name: Terraform fmt/validate/plan (safe)
+    runs-on: ubuntu-latest
+    env:
+      TERRAFORM_DIR: infra/terraform
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Terraform/AWS preflight
+        id: preflight
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+        run: |
+          set -euo pipefail
+
+          terraform_available="false"
+          aws_creds_available="false"
+
+          if command -v terraform >/dev/null 2>&1; then
+            terraform_available="true"
+          fi
+
+          if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+            aws_creds_available="true"
+          elif [[ -n "${AWS_ROLE_TO_ASSUME:-}" ]]; then
+            aws_creds_available="true"
+          fi
+
+          echo "terraform_available=${terraform_available}" >> "$GITHUB_OUTPUT"
+          echo "aws_creds_available=${aws_creds_available}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$terraform_available" != "true" ]]; then
+            {
+              echo "### ℹ️ Terraform checks skipped"
+              echo "Runner에 terraform binary가 없어 fmt/validate/plan 단계를 건너뜁니다."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$aws_creds_available" != "true" ]]; then
+            {
+              echo "### ℹ️ Terraform plan skipped"
+              echo "AWS credentials가 없어 plan 단계만 건너뜁니다. (fmt/validate는 계속 수행)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Terraform fmt check
+        if: steps.preflight.outputs.terraform_available == 'true'
+        run: terraform -chdir="${TERRAFORM_DIR}" fmt -check -recursive
+
+      - name: Terraform init (backend disabled)
+        if: steps.preflight.outputs.terraform_available == 'true'
+        run: terraform -chdir="${TERRAFORM_DIR}" init -backend=false -input=false
+
+      - name: Terraform validate
+        if: steps.preflight.outputs.terraform_available == 'true'
+        run: terraform -chdir="${TERRAFORM_DIR}" validate
+
+      - name: Terraform plan (staging safe mode)
+        if: steps.preflight.outputs.terraform_available == 'true' && steps.preflight.outputs.aws_creds_available == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        run: |
+          terraform -chdir="${TERRAFORM_DIR}" plan \
+            -input=false \
+            -lock=false \
+            -refresh=false \
+            -var-file="environments/staging.tfvars" \
+            -var="allow_resource_creation=false"

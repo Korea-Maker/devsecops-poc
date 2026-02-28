@@ -273,6 +273,10 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 - `.github/workflows/deploy-production.yml`: `v*` tag push 또는 수동 실행(`confirm=DEPLOY_PROD`) 기준 production 배포
   - staging과 동일한 verify/preflight 계약 + 수동 실행 안전장치(confirm input)
   - 필수 구성 누락 시 **실패 대신 skip** + 명확한 사유 기록
+- `.github/workflows/terraform-pr-checks.yml`: Terraform PR 검증
+  - 트리거: `infra/terraform/**`, `infra/scripts/terraform-*.sh`, workflow 변경
+  - `fmt -check`, `validate`, `plan(안전 모드)` 수행
+  - terraform binary/AWS creds 누락 시 **실패 대신 skip** + Step Summary 사유 기록
 - `.github/actions/devsecops-scan/action.yml`: Composite Action
   - 스캔 생성 (POST /api/v1/scans)
   - 폴링으로 완료 대기 (최대 5분, 10초 간격)
@@ -296,6 +300,11 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - probe 권장값: tenant A 전용 read-only GET 경로 (예: `/api/v1/scans/<tenant-a-scan-id>`)
   - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
   - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
+- Terraform 스크립트 계약
+  - `infra/scripts/terraform-plan.sh <dev|staging|prod>`: 환경 인자 필수
+  - `infra/scripts/terraform-plan.sh <env> --allow-create`: 리소스 생성 plan 명시 허용
+  - `infra/scripts/terraform-apply.sh <env>`: 대화형 확인 후 apply
+  - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 실행 거부
 
 ### PostgreSQL Tenant RLS enablement / rollback runbook (Ops MVP Phase K)
 
