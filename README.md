@@ -238,6 +238,9 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - verify 단계에서 API test/typecheck/build + Web typecheck/build 선검증
   - preflight에서 필수 secret/variable 누락 시 **실패 대신 skip** + Step Summary 안내
   - deploy webhook 호출 후 `infra/scripts/post-deploy-smoke-check.sh` 실행
+  - smoke 통과 후 optional RLS canary(`infra/scripts/verify-rls-canary.sh`) 실행
+    - `STAGING_RLS_CANARY_ENABLED=true` + 필수 env/secrets 완비 시 tenant 격리 검증 실패를 배포 실패로 처리
+    - 미활성화/구성 누락 시 Step Summary에 사유를 남기고 **skip(exit 0)**
 - `.github/workflows/deploy-production.yml`: `v*` tag push 또는 수동 실행(`confirm=DEPLOY_PROD`) 기준 production 배포
   - staging과 동일한 verify/preflight 계약 + 수동 실행 안전장치(confirm input)
   - 필수 구성 누락 시 **실패 대신 skip** + 명확한 사유 기록
@@ -248,14 +251,28 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 
 **배포 워크플로우 시크릿/변수 계약:**
 - Staging
-  - secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
-  - variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`
+  - required secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
+  - required variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`
+  - optional canary secrets: `STAGING_RLS_CANARY_ALLOWED_HEADERS`, `STAGING_RLS_CANARY_DENIED_HEADERS`
+  - optional canary variables: `STAGING_RLS_CANARY_ENABLED`, `STAGING_RLS_CANARY_API_BASE_URL`, `STAGING_RLS_CANARY_PROBE_PATH`, `STAGING_RLS_CANARY_EXPECT_ALLOWED_STATUS`, `STAGING_RLS_CANARY_EXPECT_DENIED_STATUSES`
 - Production
   - secrets: `PRODUCTION_DEPLOY_WEBHOOK_URL`, `PRODUCTION_DEPLOY_WEBHOOK_TOKEN`
   - variables: `PRODUCTION_SMOKE_API_HEALTH_URL`, `PRODUCTION_SMOKE_WEB_HEALTH_URL`
 - Smoke check 스크립트 계약(`infra/scripts/post-deploy-smoke-check.sh`)
   - required: `SMOKE_API_HEALTH_URL`, `SMOKE_WEB_HEALTH_URL`
   - optional: `SMOKE_TIMEOUT_SECONDS`, `SMOKE_RETRY_COUNT`, `SMOKE_RETRY_DELAY_SECONDS`
+- RLS canary 스크립트 계약(`infra/scripts/verify-rls-canary.sh`, read-only GET probe)
+  - enable gate: `RLS_CANARY_ENABLED=true`
+  - required (enabled일 때): `RLS_CANARY_API_BASE_URL`, `RLS_CANARY_PROBE_PATH`, `RLS_CANARY_ALLOWED_HEADERS`, `RLS_CANARY_DENIED_HEADERS`
+  - probe 권장값: tenant A 전용 read-only GET 경로 (예: `/api/v1/scans/<tenant-a-scan-id>`)
+  - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
+  - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
+
+
+**운영/실서비스 MVP complete 판정 조건(현재):**
+- staging/prod 배포 워크플로우가 verify → preflight(skip-safe) → deploy → smoke 계약으로 동작
+- staging 배포는 smoke 이후 optional RLS canary를 실행하고, 활성화+구성 완비 시 tenant 격리 mismatch를 실패로 처리
+- canary 비활성화/구성 누락 시 CI를 깨지 않고 skip 사유를 Step Summary에 명시
 
 **Webhook 환경변수:**
 - `GITHUB_WEBHOOK_SECRET`: webhook 시그니처 검증 시크릿 (선택)
@@ -330,7 +347,7 @@ pnpm --filter @devsecops/web build
 - **감사 로그 보존정책 기본값 비활성화**: 하위호환을 위해 `TENANT_AUDIT_LOG_RETENTION_DAYS`를 설정하지 않으면 감사 로그는 자동 삭제되지 않음
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
-- **DB RLS 미적용(설계 완료)**: 현재 tenant 격리는 앱 레벨 필터가 중심이며, PostgreSQL RLS 실제 적용은 `docs/architecture/TENANT_RLS_ROLLOUT.md` 계획에 따라 후속 진행 예정
+- **DB RLS enforce 미적용(설계+canary 준비)**: 현재 tenant 격리는 앱 레벨 필터가 중심이며, staging read-only canary(`infra/scripts/verify-rls-canary.sh`)로 격리 회귀를 점검할 수 있지만 PostgreSQL RLS migration/role 분리 적용은 후속 진행 예정
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체

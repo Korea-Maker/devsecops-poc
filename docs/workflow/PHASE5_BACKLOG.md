@@ -113,6 +113,14 @@
   - 필수 secret/variable 누락 시 실패 대신 skip + Step Summary 사유 출력(기존 CI 비차단)
   - 공통 post-deploy smoke check 계약 스크립트 추가: `infra/scripts/post-deploy-smoke-check.sh`
 
+- [x] Ops MVP Phase J 운영/실서비스 최종화 (staging RLS canary wiring)
+  - 신규 read-only canary 스크립트: `infra/scripts/verify-rls-canary.sh`
+  - 검증 계약: tenant A 허용 요청은 성공(기본 200), tenant B 교차 접근은 거부(기본 401/403/404)
+  - `deploy-staging.yml` smoke 이후 optional canary step 추가
+    - enabled + 구성 완비 시 mismatch를 배포 실패로 처리
+    - 비활성화/구성 누락 시 Step Summary에 사유를 남기고 skip(exit 0)
+  - README/DEPLOYMENT 문서에 canary env 계약 + MVP complete 조건 명시
+
 - [x] Tenant PostgreSQL RLS 롤아웃 설계 문서화
   - 신규 문서: `docs/architecture/TENANT_RLS_ROLLOUT.md`
   - 포함 내용: 단계별 migration 계획, 정책 SQL 예시, 앱 세션 변수(`set_config`) 전략, 롤백 runbook
@@ -132,10 +140,20 @@
 - [x] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
-- [ ] tenant RLS migration/role 분리 실제 적용 + staging canary 검증
+- [ ] tenant RLS migration/role 분리 실제 적용 (DB enforce 단계)
+- [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
 - [x] staging/prod 배포 워크플로우 초안 구현 (graceful skip + post-deploy smoke contract)
 - [ ] SaaS 인프라(IaC) 실제 리소스 프로비저닝/배포 자동화 고도화
+
+---
+
+## 운영/실서비스 MVP complete 판정 조건 (현재)
+
+- [x] staging/prod 배포 워크플로우 verify/preflight/deploy/smoke 계약 구현
+- [x] staging smoke 이후 optional RLS canary 실행 + enabled/config complete일 때 mismatch fail-fast
+- [x] canary 비활성/구성 누락 시 skip(exit 0) + Step Summary 사유 기록으로 CI 탄력성 보장
+- [ ] PostgreSQL RLS migration/role 분리 실제 enforce 적용
 
 ---
 

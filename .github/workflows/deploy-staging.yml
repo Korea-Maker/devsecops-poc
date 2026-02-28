@@ -136,6 +136,18 @@ jobs:
           SMOKE_RETRY_DELAY_SECONDS: "10"
         run: bash infra/scripts/post-deploy-smoke-check.sh
 
+      - name: Post-deploy RLS canary check (optional)
+        env:
+          RLS_CANARY_ENABLED: ${{ vars.STAGING_RLS_CANARY_ENABLED }}
+          RLS_CANARY_API_BASE_URL: ${{ vars.STAGING_RLS_CANARY_API_BASE_URL }}
+          RLS_CANARY_PROBE_PATH: ${{ vars.STAGING_RLS_CANARY_PROBE_PATH }}
+          RLS_CANARY_ALLOWED_HEADERS: ${{ secrets.STAGING_RLS_CANARY_ALLOWED_HEADERS }}
+          RLS_CANARY_DENIED_HEADERS: ${{ secrets.STAGING_RLS_CANARY_DENIED_HEADERS }}
+          RLS_CANARY_EXPECT_ALLOWED_STATUS: ${{ vars.STAGING_RLS_CANARY_EXPECT_ALLOWED_STATUS }}
+          RLS_CANARY_EXPECT_DENIED_STATUSES: ${{ vars.STAGING_RLS_CANARY_EXPECT_DENIED_STATUSES }}
+          RLS_CANARY_TIMEOUT_SECONDS: "15"
+        run: bash infra/scripts/verify-rls-canary.sh
+
   deploy-skipped:
     name: Deploy skipped (staging)
     runs-on: ubuntu-latest

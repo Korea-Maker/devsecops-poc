@@ -2,7 +2,7 @@
 
 ## 개요
 
-DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke)은 반영되었고, 클라우드 인프라(ECS/ECR/Terraform 리소스)는 후속 고도화 대상으로 남아 있다.
+DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke + staging optional RLS canary)은 반영되었고, 클라우드 인프라(ECS/ECR/Terraform 리소스)는 후속 고도화 대상으로 남아 있다.
 
 ---
 
@@ -80,7 +80,10 @@ docker-compose up -d
 3. **Push**: ECR에 이미지 푸시 (태그: `staging-latest`, `staging-{commit-sha}`)
 4. **Deploy**: ECS Service 업데이트 또는 Docker Compose 배포
 5. **Smoke Test**: 기본 헬스 체크 실행
-6. **Notification**: Slack/이메일 알림
+6. **RLS Canary (선택)**: read-only tenant 격리 probe 실행 (`infra/scripts/verify-rls-canary.sh`)
+   - `STAGING_RLS_CANARY_ENABLED=true` + 필수 env/secrets 완비 시 실패를 배포 실패로 처리
+   - 미활성화/구성 누락 시 Step Summary 사유 기록 후 skip
+7. **Notification**: Slack/이메일 알림
 
 **환경 파일**: `.env.staging` (시크릿)
 
@@ -200,6 +203,7 @@ aws ecs describe-services \
   - preflight: 필수 secret/variable 누락 시 실패 대신 skip (Step Summary 사유 기록)
   - deploy: staging deploy webhook 호출
   - post-deploy: `infra/scripts/post-deploy-smoke-check.sh` 실행
+  - post-smoke(optional): `infra/scripts/verify-rls-canary.sh` 실행 (enabled+config complete일 때만 enforce)
 - `deploy-production.yml`:
   - 트리거: `v*` tag push + 수동 실행(`confirm=DEPLOY_PROD`)
   - staging과 동일한 verify/preflight/deploy/smoke 계약
@@ -207,11 +211,29 @@ aws ecs describe-services \
 ### 배포 계약 (GitHub repository level)
 
 - Staging
-  - secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
-  - variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`
+  - required secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
+  - required variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`
+  - optional canary secrets: `STAGING_RLS_CANARY_ALLOWED_HEADERS`, `STAGING_RLS_CANARY_DENIED_HEADERS`
+  - optional canary variables: `STAGING_RLS_CANARY_ENABLED`, `STAGING_RLS_CANARY_API_BASE_URL`, `STAGING_RLS_CANARY_PROBE_PATH`, `STAGING_RLS_CANARY_EXPECT_ALLOWED_STATUS`, `STAGING_RLS_CANARY_EXPECT_DENIED_STATUSES`
 - Production
   - secrets: `PRODUCTION_DEPLOY_WEBHOOK_URL`, `PRODUCTION_DEPLOY_WEBHOOK_TOKEN`
   - variables: `PRODUCTION_SMOKE_API_HEALTH_URL`, `PRODUCTION_SMOKE_WEB_HEALTH_URL`
+
+- Smoke 스크립트 계약: `infra/scripts/post-deploy-smoke-check.sh`
+  - required: `SMOKE_API_HEALTH_URL`, `SMOKE_WEB_HEALTH_URL`
+  - optional: `SMOKE_TIMEOUT_SECONDS`, `SMOKE_RETRY_COUNT`, `SMOKE_RETRY_DELAY_SECONDS`
+- RLS canary 스크립트 계약: `infra/scripts/verify-rls-canary.sh` (read-only GET probe)
+  - enable gate: `RLS_CANARY_ENABLED=true`
+  - required(enabled일 때): `RLS_CANARY_API_BASE_URL`, `RLS_CANARY_PROBE_PATH`, `RLS_CANARY_ALLOWED_HEADERS`, `RLS_CANARY_DENIED_HEADERS`
+  - probe 권장값: tenant A 전용 read-only GET 경로 (예: `/api/v1/scans/<tenant-a-scan-id>`)
+  - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
+  - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
+
+### 운영/실서비스 MVP complete 판정 조건 (현재)
+
+- verify/preflight/deploy/smoke 파이프라인이 staging/prod에서 모두 동작
+- staging은 smoke 이후 optional RLS canary를 실행하고, 활성화+구성 완비 시 tenant 격리 mismatch를 실패로 처리
+- canary 비활성화/구성 누락은 명시적 skip(exit 0) + Step Summary 사유 기록으로 CI 탄력성 유지
 
 ### 후속 고도화
 
