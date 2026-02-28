@@ -16,6 +16,10 @@ const ORIGINAL_RETRY_BACKOFF_BASE_MS = process.env.SCAN_RETRY_BACKOFF_BASE_MS;
 const ORIGINAL_MAX_RETRIES = process.env.SCAN_MAX_RETRIES;
 const ORIGINAL_SCAN_EXECUTION_MODE = process.env.SCAN_EXECUTION_MODE;
 const ORIGINAL_TENANT_AUTH_MODE = process.env.TENANT_AUTH_MODE;
+const ORIGINAL_AUTH_MODE = process.env.AUTH_MODE;
+const ORIGINAL_JWT_ISSUER = process.env.JWT_ISSUER;
+const ORIGINAL_JWT_AUDIENCE = process.env.JWT_AUDIENCE;
+const ORIGINAL_JWT_JWKS_URL = process.env.JWT_JWKS_URL;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -40,6 +44,17 @@ function buildTenantHeaders(options: {
   }
 
   return headers;
+}
+
+function toBase64UrlJson(value: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function buildJwtToken(payload: Record<string, unknown>): string {
+  const header = toBase64UrlJson({ alg: "RS256", typ: "JWT" });
+  const body = toBase64UrlJson(payload);
+  const signature = "mock-signature";
+  return `${header}.${body}.${signature}`;
 }
 
 async function moveScanToDeadLetter(scanId: string): Promise<void> {
@@ -81,6 +96,10 @@ describe("Scans API", () => {
     process.env.SCAN_MAX_RETRIES = "2";
     process.env.SCAN_EXECUTION_MODE = "mock";
     delete process.env.TENANT_AUTH_MODE;
+    delete process.env.AUTH_MODE;
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
+    delete process.env.JWT_JWKS_URL;
     vi.useRealTimers();
   });
 
@@ -89,6 +108,10 @@ describe("Scans API", () => {
     restoreEnv("SCAN_MAX_RETRIES", ORIGINAL_MAX_RETRIES);
     restoreEnv("SCAN_EXECUTION_MODE", ORIGINAL_SCAN_EXECUTION_MODE);
     restoreEnv("TENANT_AUTH_MODE", ORIGINAL_TENANT_AUTH_MODE);
+    restoreEnv("AUTH_MODE", ORIGINAL_AUTH_MODE);
+    restoreEnv("JWT_ISSUER", ORIGINAL_JWT_ISSUER);
+    restoreEnv("JWT_AUDIENCE", ORIGINAL_JWT_AUDIENCE);
+    restoreEnv("JWT_JWKS_URL", ORIGINAL_JWT_JWKS_URL);
     vi.useRealTimers();
   });
 
@@ -650,6 +673,23 @@ describe("Scans API", () => {
       expect(response.json().code).toBe("TENANT_AUTH_INVALID_USER_ROLE");
     });
 
+    it("AUTH_MODE가 잘못된 값이어도 header 모드로 fallback 되어야 한다", async () => {
+      process.env.AUTH_MODE = "invalid-mode";
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          "x-user-id": "user-auth-fallback",
+          "x-user-role": "admin",
+        },
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-auth-fallback" },
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toHaveProperty("scanId");
+    });
+
     it("x-tenant-id가 없으면 default tenant로 처리해야 한다", async () => {
       const createRes = await app.inject({
         method: "POST",
@@ -675,6 +715,91 @@ describe("Scans API", () => {
 
       expect(getRes.statusCode).toBe(200);
       expect(getRes.json().tenantId).toBe("default");
+    });
+  });
+
+  describe("Tenant auth mode (jwt scaffold)", () => {
+    beforeEach(() => {
+      process.env.TENANT_AUTH_MODE = "required";
+      process.env.AUTH_MODE = "jwt";
+    });
+
+    it("Authorization 헤더가 없으면 401을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_BEARER_TOKEN_REQUIRED");
+    });
+
+    it("Authorization 헤더가 Bearer 형식이 아니면 401을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: "Basic abc123",
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_INVALID_AUTHORIZATION_HEADER");
+    });
+
+    it("Bearer 토큰이 JWT 형식이 아니면 401을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: "Bearer invalid-token-format",
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_INVALID_BEARER_TOKEN");
+    });
+
+    it("JWT 구성값이 없으면 503을 반환해야 한다", async () => {
+      const token = buildJwtToken({
+        sub: "jwt-user-1",
+        tenant_id: "tenant-jwt",
+        role: "admin",
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json().code).toBe("TENANT_AUTH_JWT_CONFIG_INCOMPLETE");
+    });
+
+    it("JWT 구성값이 있어도 현재 스캐폴드에서는 501을 반환해야 한다", async () => {
+      process.env.JWT_ISSUER = "https://issuer.example.com";
+      process.env.JWT_AUDIENCE = "devsecops-api";
+      process.env.JWT_JWKS_URL = "https://issuer.example.com/.well-known/jwks.json";
+
+      const token = buildJwtToken({
+        sub: "jwt-user-2",
+        tenant_id: "tenant-jwt",
+        role: "admin",
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(501);
+      expect(response.json().code).toBe("TENANT_AUTH_JWT_NOT_IMPLEMENTED");
     });
   });
 

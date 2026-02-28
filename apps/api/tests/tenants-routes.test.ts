@@ -5,6 +5,10 @@ import { clearTenantAuditLogs } from "../src/tenants/audit-log.js";
 import type { UserRole } from "../src/tenants/types.js";
 
 const ORIGINAL_TENANT_AUTH_MODE = process.env.TENANT_AUTH_MODE;
+const ORIGINAL_AUTH_MODE = process.env.AUTH_MODE;
+const ORIGINAL_JWT_ISSUER = process.env.JWT_ISSUER;
+const ORIGINAL_JWT_AUDIENCE = process.env.JWT_AUDIENCE;
+const ORIGINAL_JWT_JWKS_URL = process.env.JWT_JWKS_URL;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -46,10 +50,18 @@ describe("Tenant API", () => {
     clearOrganizationStore();
     clearTenantAuditLogs();
     delete process.env.TENANT_AUTH_MODE;
+    delete process.env.AUTH_MODE;
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
+    delete process.env.JWT_JWKS_URL;
   });
 
   afterEach(() => {
     restoreEnv("TENANT_AUTH_MODE", ORIGINAL_TENANT_AUTH_MODE);
+    restoreEnv("AUTH_MODE", ORIGINAL_AUTH_MODE);
+    restoreEnv("JWT_ISSUER", ORIGINAL_JWT_ISSUER);
+    restoreEnv("JWT_AUDIENCE", ORIGINAL_JWT_AUDIENCE);
+    restoreEnv("JWT_JWKS_URL", ORIGINAL_JWT_JWKS_URL);
     clearOrganizationStore();
     clearTenantAuditLogs();
   });
