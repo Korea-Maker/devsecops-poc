@@ -1,6 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Fastify, { type FastifyInstance } from "fastify";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import {
@@ -44,17 +46,6 @@ function buildTenantHeaders(options: {
   }
 
   return headers;
-}
-
-function toBase64UrlJson(value: Record<string, unknown>): string {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
-}
-
-function buildJwtToken(payload: Record<string, unknown>): string {
-  const header = toBase64UrlJson({ alg: "RS256", typ: "JWT" });
-  const body = toBase64UrlJson(payload);
-  const signature = "mock-signature";
-  return `${header}.${body}.${signature}`;
 }
 
 async function moveScanToDeadLetter(scanId: string): Promise<void> {
@@ -718,11 +709,74 @@ describe("Scans API", () => {
     });
   });
 
-  describe("Tenant auth mode (jwt scaffold)", () => {
+  describe("Tenant auth mode (jwt)", () => {
+    let jwksServer: FastifyInstance;
+    let jwksUrl = "";
+    let signingKey!: CryptoKey;
+    let invalidSigningKey!: CryptoKey;
+
+    const jwtIssuer = "https://issuer.example.com";
+    const jwtAudience = "devsecops-api";
+    const jwtKid = "test-rs256-kid";
+
+    type JwtIssueOptions = {
+      claims?: Record<string, unknown>;
+      issuer?: string;
+      audience?: string;
+      signingPrivateKey?: CryptoKey;
+    };
+
+    beforeAll(async () => {
+      const validKeyPair = await generateKeyPair("RS256");
+      const invalidKeyPair = await generateKeyPair("RS256");
+
+      signingKey = validKeyPair.privateKey;
+      invalidSigningKey = invalidKeyPair.privateKey;
+
+      const publicJwk = await exportJWK(validKeyPair.publicKey);
+      publicJwk.kid = jwtKid;
+      publicJwk.use = "sig";
+      publicJwk.alg = "RS256";
+
+      jwksServer = Fastify({ logger: false });
+      jwksServer.get("/.well-known/jwks.json", async () => ({
+        keys: [publicJwk],
+      }));
+
+      const listeningOrigin = await jwksServer.listen({
+        port: 0,
+        host: "127.0.0.1",
+      });
+      jwksUrl = `${listeningOrigin}/.well-known/jwks.json`;
+    });
+
+    afterAll(async () => {
+      await jwksServer.close();
+    });
+
     beforeEach(() => {
       process.env.TENANT_AUTH_MODE = "required";
       process.env.AUTH_MODE = "jwt";
+      process.env.JWT_ISSUER = jwtIssuer;
+      process.env.JWT_AUDIENCE = jwtAudience;
+      process.env.JWT_JWKS_URL = jwksUrl;
     });
+
+    async function issueToken(options: JwtIssueOptions = {}): Promise<string> {
+      const signer = options.signingPrivateKey ?? signingKey;
+
+      return new SignJWT(options.claims ?? {})
+        .setProtectedHeader({
+          alg: "RS256",
+          typ: "JWT",
+          kid: jwtKid,
+        })
+        .setIssuedAt()
+        .setExpirationTime("10m")
+        .setIssuer(options.issuer ?? jwtIssuer)
+        .setAudience(options.audience ?? jwtAudience)
+        .sign(signer);
+    }
 
     it("Authorization 헤더가 없으면 401을 반환해야 한다", async () => {
       const response = await app.inject({
@@ -760,11 +814,15 @@ describe("Scans API", () => {
       expect(response.json().code).toBe("TENANT_AUTH_INVALID_BEARER_TOKEN");
     });
 
-    it("JWT 구성값이 없으면 503을 반환해야 한다", async () => {
-      const token = buildJwtToken({
-        sub: "jwt-user-1",
-        tenant_id: "tenant-jwt",
-        role: "admin",
+    it("JWT 구성값이 누락되면 503을 반환해야 한다", async () => {
+      delete process.env.JWT_JWKS_URL;
+
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-config-missing",
+          tenant_id: "tenant-jwt-config-missing",
+          role: "admin",
+        },
       });
 
       const response = await app.inject({
@@ -779,15 +837,15 @@ describe("Scans API", () => {
       expect(response.json().code).toBe("TENANT_AUTH_JWT_CONFIG_INCOMPLETE");
     });
 
-    it("JWT 구성값이 있어도 현재 스캐폴드에서는 501을 반환해야 한다", async () => {
-      process.env.JWT_ISSUER = "https://issuer.example.com";
-      process.env.JWT_AUDIENCE = "devsecops-api";
-      process.env.JWT_JWKS_URL = "https://issuer.example.com/.well-known/jwks.json";
+    it("JWT_JWKS_URL 형식이 잘못되면 503을 반환해야 한다", async () => {
+      process.env.JWT_JWKS_URL = "ftp://issuer.example.com/jwks.json";
 
-      const token = buildJwtToken({
-        sub: "jwt-user-2",
-        tenant_id: "tenant-jwt",
-        role: "admin",
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-config-invalid",
+          tenant_id: "tenant-jwt-config-invalid",
+          role: "admin",
+        },
       });
 
       const response = await app.inject({
@@ -798,8 +856,221 @@ describe("Scans API", () => {
         },
       });
 
-      expect(response.statusCode).toBe(501);
-      expect(response.json().code).toBe("TENANT_AUTH_JWT_NOT_IMPLEMENTED");
+      expect(response.statusCode).toBe(503);
+      expect(response.json().code).toBe("TENANT_AUTH_JWT_CONFIG_INVALID");
+    });
+
+    it("유효한 JWT면 JWKS 서명 검증 후 요청이 통과해야 한다", async () => {
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-valid",
+          tenant_id: "tenant-jwt-valid",
+          role: "admin",
+        },
+      });
+
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-jwt-valid" },
+      });
+
+      expect(createRes.statusCode).toBe(202);
+      const scanId = createRes.json().scanId as string;
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(getRes.statusCode).toBe(200);
+      expect(getRes.json().tenantId).toBe("tenant-jwt-valid");
+    });
+
+    it("tenant_id가 없으면 tid, sub가 없으면 user_id, role이 없으면 roles[0]를 사용해야 한다", async () => {
+      const token = await issueToken({
+        claims: {
+          user_id: "jwt-user-fallback",
+          tid: "tenant-jwt-fallback",
+          roles: ["member"],
+        },
+      });
+
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+        payload: { engine: "trivy", repoUrl: "https://github.com/test/repo-jwt-fallback" },
+      });
+
+      expect(createRes.statusCode).toBe(202);
+      const scanId = createRes.json().scanId as string;
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(getRes.statusCode).toBe(200);
+      expect(getRes.json().tenantId).toBe("tenant-jwt-fallback");
+    });
+
+    it("서명이 유효하지 않으면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        signingPrivateKey: invalidSigningKey,
+        claims: {
+          sub: "jwt-user-invalid-signature",
+          tenant_id: "tenant-jwt-invalid-signature",
+          role: "admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_INVALID_BEARER_TOKEN_SIGNATURE");
+    });
+
+    it("issuer가 다르면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        issuer: "https://another-issuer.example.com",
+        claims: {
+          sub: "jwt-user-issuer-mismatch",
+          tenant_id: "tenant-jwt-issuer-mismatch",
+          role: "admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_JWT_ISSUER_MISMATCH");
+    });
+
+    it("audience가 다르면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        audience: "other-audience",
+        claims: {
+          sub: "jwt-user-audience-mismatch",
+          tenant_id: "tenant-jwt-audience-mismatch",
+          role: "admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_JWT_AUDIENCE_MISMATCH");
+    });
+
+    it("tenant_id/tid가 모두 없으면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-missing-tenant",
+          role: "admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_TENANT_ID_CLAIM_REQUIRED");
+    });
+
+    it("sub/user_id가 모두 없으면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        claims: {
+          tenant_id: "tenant-jwt-missing-user",
+          role: "admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_USER_ID_CLAIM_REQUIRED");
+    });
+
+    it("role/roles[0]가 모두 없으면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-missing-role",
+          tenant_id: "tenant-jwt-missing-role",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_USER_ROLE_CLAIM_REQUIRED");
+    });
+
+    it("JWT role이 허용되지 않은 값이면 401을 반환해야 한다", async () => {
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-invalid-role",
+          tenant_id: "tenant-jwt-invalid-role",
+          role: "super-admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_INVALID_USER_ROLE_CLAIM");
     });
   });
 

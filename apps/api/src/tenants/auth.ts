@@ -1,4 +1,11 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  createRemoteJWKSet,
+  errors as joseErrors,
+  jwtVerify,
+  type JWTPayload,
+  type JWTVerifyGetKey,
+} from "jose";
 import { DEFAULT_TENANT_ID, type TenantContext, type UserRole } from "./types.js";
 
 export type TenantAuthMode = "disabled" | "required";
@@ -13,6 +20,9 @@ const USER_ROLE_PRIORITY: Record<UserRole, number> = {
 
 const VALID_USER_ROLES = Object.keys(USER_ROLE_PRIORITY) as UserRole[];
 const VALID_USER_ROLE_SET: ReadonlySet<string> = new Set(VALID_USER_ROLES);
+const JWT_ALLOWED_ALGORITHMS = ["RS256", "ES256"] as const;
+
+const remoteJwksCache = new Map<string, JWTVerifyGetKey>();
 
 interface TenantAuthErrorBody {
   error: string;
@@ -41,6 +51,22 @@ interface BearerTokenResolutionSuccess {
 type BearerTokenResolution =
   | BearerTokenResolutionSuccess
   | TenantAuthResolutionFailure;
+
+interface JwtVerificationSuccess {
+  ok: true;
+  payload: JWTPayload;
+}
+
+type JwtVerificationResult =
+  | JwtVerificationSuccess
+  | TenantAuthResolutionFailure;
+
+interface JwtAuthConfigResolved {
+  issuer: string;
+  audience: string;
+  jwksUrl: string;
+  jwksResolver: JWTVerifyGetKey;
+}
 
 export interface JwtAuthConfig {
   issuer?: string;
@@ -113,56 +139,247 @@ function failAuth(
   };
 }
 
-function decodeBase64Url(input: string): string | null {
-  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
-  const padLength = normalized.length % 4 === 0 ? 0 : 4 - (normalized.length % 4);
-  const padded = `${normalized}${"=".repeat(padLength)}`;
-
-  try {
-    return Buffer.from(padded, "base64").toString("utf8");
-  } catch {
-    return null;
+function getOrCreateRemoteJwks(jwksUrl: URL): JWTVerifyGetKey {
+  const cacheKey = jwksUrl.toString();
+  const cached = remoteJwksCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
+
+  const jwksResolver = createRemoteJWKSet(jwksUrl);
+  remoteJwksCache.set(cacheKey, jwksResolver);
+  return jwksResolver;
 }
 
-function parseJsonRecord(value: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(value);
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+function resolveJwtAuthConfig():
+  | { ok: true; config: JwtAuthConfigResolved }
+  | TenantAuthResolutionFailure {
+  const jwtConfig = getJwtAuthConfig();
+  const { issuer, audience, jwksUrl } = jwtConfig;
+
+  if (!issuer || !audience || !jwksUrl) {
+    const missingVars: string[] = [];
+    if (!issuer) {
+      missingVars.push("JWT_ISSUER");
     }
-    return null;
-  } catch {
-    return null;
+    if (!audience) {
+      missingVars.push("JWT_AUDIENCE");
+    }
+    if (!jwksUrl) {
+      missingVars.push("JWT_JWKS_URL");
+    }
+
+    return failAuth(
+      503,
+      `JWT 모드 구성값이 부족합니다(${missingVars.join(", ")} 필요)`,
+      "TENANT_AUTH_JWT_CONFIG_INCOMPLETE"
+    );
   }
+
+  let parsedJwksUrl: URL;
+  try {
+    parsedJwksUrl = new URL(jwksUrl);
+  } catch {
+    return failAuth(
+      503,
+      "JWT_JWKS_URL은 http/https URL이어야 합니다",
+      "TENANT_AUTH_JWT_CONFIG_INVALID"
+    );
+  }
+
+  if (parsedJwksUrl.protocol !== "https:" && parsedJwksUrl.protocol !== "http:") {
+    return failAuth(
+      503,
+      "JWT_JWKS_URL은 http/https URL이어야 합니다",
+      "TENANT_AUTH_JWT_CONFIG_INVALID"
+    );
+  }
+
+  return {
+    ok: true,
+    config: {
+      issuer,
+      audience,
+      jwksUrl,
+      jwksResolver: getOrCreateRemoteJwks(parsedJwksUrl),
+    },
+  };
 }
 
-function isStructurallyValidJwt(token: string): boolean {
-  const segments = token.split(".");
-  if (segments.length !== 3) {
-    return false;
+function readStringClaim(payload: JWTPayload, claimName: string): string | undefined {
+  const claimValue = payload[claimName];
+  if (typeof claimValue !== "string") {
+    return undefined;
   }
 
-  const [headerSegment, payloadSegment, signatureSegment] = segments;
-  if (!headerSegment || !payloadSegment || !signatureSegment) {
-    return false;
+  const trimmed = claimValue.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readClaimWithFallback(
+  payload: JWTPayload,
+  claimNames: readonly string[]
+): string | undefined {
+  for (const claimName of claimNames) {
+    const claimValue = readStringClaim(payload, claimName);
+    if (claimValue) {
+      return claimValue;
+    }
   }
 
-  const decodedHeader = decodeBase64Url(headerSegment);
-  const decodedPayload = decodeBase64Url(payloadSegment);
+  return undefined;
+}
 
-  if (!decodedHeader || !decodedPayload) {
-    return false;
+function readRoleClaim(payload: JWTPayload): string | undefined {
+  const directRole = readStringClaim(payload, "role");
+  if (directRole) {
+    return directRole;
   }
 
-  const headerRecord = parseJsonRecord(decodedHeader);
-  const payloadRecord = parseJsonRecord(decodedPayload);
-
-  if (!headerRecord || !payloadRecord) {
-    return false;
+  const rolesClaim = payload.roles;
+  if (!Array.isArray(rolesClaim)) {
+    return undefined;
   }
 
-  return typeof payloadRecord.sub === "string" && payloadRecord.sub.trim().length > 0;
+  const firstRole = rolesClaim[0];
+  if (typeof firstRole !== "string") {
+    return undefined;
+  }
+
+  const trimmed = firstRole.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveTenantContextFromJwtPayload(
+  payload: JWTPayload
+): TenantAuthResolution {
+  const tenantId = readClaimWithFallback(payload, ["tenant_id", "tid"]);
+  if (!tenantId) {
+    return failAuth(
+      401,
+      "JWT tenant_id 또는 tid 클레임이 필요합니다",
+      "TENANT_AUTH_TENANT_ID_CLAIM_REQUIRED"
+    );
+  }
+
+  const userId = readClaimWithFallback(payload, ["sub", "user_id"]);
+  if (!userId) {
+    return failAuth(
+      401,
+      "JWT sub 또는 user_id 클레임이 필요합니다",
+      "TENANT_AUTH_USER_ID_CLAIM_REQUIRED"
+    );
+  }
+
+  const roleClaim = readRoleClaim(payload);
+  if (!roleClaim) {
+    return failAuth(
+      401,
+      "JWT role 또는 roles[0] 클레임이 필요합니다",
+      "TENANT_AUTH_USER_ROLE_CLAIM_REQUIRED"
+    );
+  }
+
+  const normalizedRole = roleClaim.toLowerCase();
+  if (!isUserRole(normalizedRole)) {
+    return failAuth(
+      401,
+      `JWT role 클레임은 ${VALID_USER_ROLES.join(", ")} 중 하나여야 합니다`,
+      "TENANT_AUTH_INVALID_USER_ROLE_CLAIM"
+    );
+  }
+
+  return {
+    ok: true,
+    tenantContext: {
+      tenantId,
+      userId,
+      role: normalizedRole,
+    },
+  };
+}
+
+function mapJwtVerificationError(error: unknown): TenantAuthResolutionFailure {
+  if (error instanceof joseErrors.JWTClaimValidationFailed) {
+    if (error.claim === "iss") {
+      return failAuth(
+        401,
+        "JWT issuer가 일치하지 않습니다",
+        "TENANT_AUTH_JWT_ISSUER_MISMATCH"
+      );
+    }
+
+    if (error.claim === "aud") {
+      return failAuth(
+        401,
+        "JWT audience가 일치하지 않습니다",
+        "TENANT_AUTH_JWT_AUDIENCE_MISMATCH"
+      );
+    }
+
+    return failAuth(
+      401,
+      "JWT 클레임 검증에 실패했습니다",
+      "TENANT_AUTH_INVALID_BEARER_TOKEN"
+    );
+  }
+
+  if (error instanceof joseErrors.JWTExpired) {
+    return failAuth(401, "JWT 토큰이 만료되었습니다", "TENANT_AUTH_JWT_EXPIRED");
+  }
+
+  if (
+    error instanceof joseErrors.JWSSignatureVerificationFailed ||
+    error instanceof joseErrors.JWKSNoMatchingKey
+  ) {
+    return failAuth(
+      401,
+      "JWT 서명 검증에 실패했습니다",
+      "TENANT_AUTH_INVALID_BEARER_TOKEN_SIGNATURE"
+    );
+  }
+
+  if (error instanceof joseErrors.JWKSInvalid) {
+    return failAuth(
+      503,
+      "JWKS 응답이 올바른 형식이 아닙니다",
+      "TENANT_AUTH_JWKS_INVALID"
+    );
+  }
+
+  if (error instanceof TypeError) {
+    return failAuth(
+      503,
+      "JWKS 엔드포인트에 접근할 수 없습니다",
+      "TENANT_AUTH_JWKS_UNREACHABLE"
+    );
+  }
+
+  return failAuth(
+    401,
+    "유효한 JWT Bearer 토큰이 아닙니다",
+    "TENANT_AUTH_INVALID_BEARER_TOKEN"
+  );
+}
+
+async function verifyJwtToken(
+  token: string,
+  jwtConfig: JwtAuthConfigResolved
+): Promise<JwtVerificationResult> {
+  try {
+    const { payload } = await jwtVerify(token, jwtConfig.jwksResolver, {
+      issuer: jwtConfig.issuer,
+      audience: jwtConfig.audience,
+      algorithms: [...JWT_ALLOWED_ALGORITHMS],
+    });
+
+    return {
+      ok: true,
+      payload,
+    };
+  } catch (error) {
+    return mapJwtVerificationError(error);
+  }
 }
 
 function resolveTenantContextFromHeaderAuth(
@@ -242,38 +459,28 @@ function readBearerToken(headers: FastifyRequest["headers"]): BearerTokenResolut
   };
 }
 
-function resolveTenantContextFromJwtAuth(
+async function resolveTenantContextFromJwtAuth(
   request: FastifyRequest
-): TenantAuthResolution {
+): Promise<TenantAuthResolution> {
   const tokenResolution = readBearerToken(request.headers);
   if (!tokenResolution.ok) {
     return tokenResolution;
   }
 
-  if (!isStructurallyValidJwt(tokenResolution.token)) {
-    return failAuth(
-      401,
-      "유효한 JWT Bearer 토큰이 아닙니다",
-      "TENANT_AUTH_INVALID_BEARER_TOKEN"
-    );
+  const jwtConfigResolution = resolveJwtAuthConfig();
+  if (!jwtConfigResolution.ok) {
+    return jwtConfigResolution;
   }
 
-  const jwtConfig = getJwtAuthConfig();
-  if (!jwtConfig.issuer || !jwtConfig.audience || !jwtConfig.jwksUrl) {
-    return failAuth(
-      503,
-      "JWT 모드 구성값이 부족합니다(JWT_ISSUER, JWT_AUDIENCE, JWT_JWKS_URL 필요)",
-      "TENANT_AUTH_JWT_CONFIG_INCOMPLETE"
-    );
-  }
-
-  // TODO(phase5-auth): JOSE/JWKS 서명 검증 + iss/aud/exp 검증을 구현한 뒤
-  // tenant/user/role 클레임 매핑을 활성화한다.
-  return failAuth(
-    501,
-    "JWT 인증 검증은 아직 준비 중입니다. 현재는 AUTH_MODE=header를 사용하세요",
-    "TENANT_AUTH_JWT_NOT_IMPLEMENTED"
+  const verificationResult = await verifyJwtToken(
+    tokenResolution.token,
+    jwtConfigResolution.config
   );
+  if (!verificationResult.ok) {
+    return verificationResult;
+  }
+
+  return resolveTenantContextFromJwtPayload(verificationResult.payload);
 }
 
 export function getTenantAuthMode(): TenantAuthMode {
@@ -335,9 +542,10 @@ export async function tenantAuthOnRequest(
     return;
   }
 
+  const authMode = getAuthMode();
   const authResolution =
-    getAuthMode() === "jwt"
-      ? resolveTenantContextFromJwtAuth(request)
+    authMode === "jwt"
+      ? await resolveTenantContextFromJwtAuth(request)
       : resolveTenantContextFromHeaderAuth(request);
 
   if (!authResolution.ok) {

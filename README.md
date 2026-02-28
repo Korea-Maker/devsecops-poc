@@ -83,16 +83,21 @@
 - `TENANT_AUTH_MODE` 기본값: `disabled` (기존 동작 유지, 기본 tenant=`default`)
 - `TENANT_AUTH_MODE=required`일 때 인증 소스는 `AUTH_MODE`로 선택
   - 기본값: `AUTH_MODE=header` (기존 헤더 계약과 완전 호환)
-  - 선택값: `AUTH_MODE=jwt` (전환 스캐폴드)
+  - 선택값: `AUTH_MODE=jwt` (JWKS 서명 검증 구현)
 - `AUTH_MODE=header` 계약:
   - `x-tenant-id` (선택, 미전달 시 `default` 사용)
   - `x-user-id` (필수)
   - `x-user-role` (필수, `owner | admin | member | viewer`)
   - 누락/형식 오류 시 4xx + `{ error, code }`
-- `AUTH_MODE=jwt` 스캐폴드 계약:
+- `AUTH_MODE=jwt` 계약:
   - `Authorization: Bearer <token>` 필수
-  - JWT 구조/헤더 형식/기본 설정값을 검사하고, 현재는 서명 검증 미구현으로 `501 TENANT_AUTH_JWT_NOT_IMPLEMENTED` 반환
-  - 서명 검증 구현 전에는 production에서 `AUTH_MODE=header` 유지 권장
+  - `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL` 필수 (`JWT_JWKS_URL`은 http/https URL)
+  - JOSE 기반 remote JWKS 검증 + `iss`/`aud` + 서명 알고리즘(`RS256 | ES256`) 검증
+  - claim 매핑(모두 required):
+    - tenantId: `tenant_id` (fallback: `tid`)
+    - userId: `sub` (fallback: `user_id`)
+    - role: `role` (fallback: `roles[0]`) — `owner | admin | member | viewer`
+  - 검증/클레임 실패 시 401 + `{ error, code }`
 - queue/dead-letter 수동 운영 API(`queue/status`, `queue/process-next`, `dead-letters`, `redrive`)는 `admin` 이상(role hierarchy: `owner > admin > member > viewer`)만 접근 가능
 
 스캔 워커 동작:
@@ -113,9 +118,9 @@
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
 - `TENANT_AUTH_MODE`: `disabled | required` (기본값 `disabled`)
 - `AUTH_MODE`: `header | jwt` (기본값 `header`, `TENANT_AUTH_MODE=required`일 때 적용)
-- `JWT_ISSUER`: JWT issuer placeholder (`AUTH_MODE=jwt`에서 사용)
-- `JWT_AUDIENCE`: JWT audience placeholder (`AUTH_MODE=jwt`에서 사용)
-- `JWT_JWKS_URL`: JWT JWKS endpoint placeholder (`AUTH_MODE=jwt`에서 사용)
+- `JWT_ISSUER`: JWT issuer (`AUTH_MODE=jwt`에서 필수)
+- `JWT_AUDIENCE`: JWT audience (`AUTH_MODE=jwt`에서 필수)
+- `JWT_JWKS_URL`: JWT JWKS endpoint (`AUTH_MODE=jwt`에서 필수, http/https)
 
 ### 운영/관리 API 사용 예시
 
@@ -233,7 +238,7 @@ pnpm --filter @devsecops/web build
 
 - **인메모리 스토어**: API 서버 재시작 시 모든 스캔 데이터 소실 (PostgreSQL 연동 예정)
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
-- **인증 제한**: `AUTH_MODE=jwt`는 전환 스캐폴드만 구현됨(구조/설정 검증 + 501 반환). JWT 서명 검증, Google SSO/OAuth 로그인 플로우는 후속 구현 필요
+- **인증 제한**: JWT 검증은 구현되었지만 Google SSO/OAuth 로그인(웹 세션 발급), 토큰 회전 자동화, IdP 운영 가이드는 후속 구현 필요
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체
