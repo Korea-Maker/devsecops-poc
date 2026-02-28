@@ -143,15 +143,17 @@ infra/terraform/
 ├── variables.tf                  # 입력 변수 + validation
 ├── outputs.tf                    # 모듈 출력값
 ├── README.md                     # Terraform 실행 가이드
+├── DRY_RUN_REHEARSAL_CHECKLIST.md
 ├── modules/
 │   ├── vpc/                      # VPC/Subnet/RT/NAT skeleton
 │   ├── rds/                      # PostgreSQL RDS skeleton
 │   ├── ecs/                      # ECS Cluster/ALB skeleton
 │   └── s3/                       # Artifacts/Logs bucket skeleton
 ├── environments/
-│   ├── dev.tfvars               # dev 환경 예시 변수
-│   ├── staging.tfvars           # staging 환경 예시 변수
-│   └── prod.tfvars              # prod 환경 예시 변수
+│   ├── dev.tfvars                # dev 환경 변수
+│   ├── staging.tfvars            # staging 환경 변수
+│   ├── prod.tfvars               # prod 환경 변수
+│   └── templates/                # 값 준비 템플릿 + 운영 노트
 └── plans/                        # 로컬 plan 출력 경로 (git ignore)
 ```
 
@@ -161,7 +163,8 @@ infra/terraform/
 - 모든 모듈은 `enabled=false` 기본값(비활성)
 - 루트에서 `allow_resource_creation=false` 기본값(전역 생성 금지)
 - `check` 블록 기반 선행조건 검증(모듈 의존성/스토리지 범위/스냅샷 설정)
-- tfvars 샘플(dev/staging/prod) 추가
+- tfvars 샘플(dev/staging/prod) + 환경 템플릿(dev/staging/prod) 추가
+- preflight validator(`infra/scripts/terraform-preflight-validate.sh`) 추가
 
 ### Terraform 실행 플로우 (정확한 절차)
 
@@ -171,16 +174,19 @@ terraform -chdir=infra/terraform fmt -recursive
 terraform -chdir=infra/terraform init -backend=false
 terraform -chdir=infra/terraform validate
 
-# 1) 안전 모드 plan (기본: 리소스 생성 없음)
+# 1) 값/템플릿 preflight
+bash infra/scripts/terraform-preflight-validate.sh staging
+
+# 2) 안전 모드 plan (기본: 리소스 생성 없음)
 bash infra/scripts/terraform-plan.sh staging
 
-# 2) 생성 포함 plan (명시적 --allow-create 필요)
+# 3) 생성 포함 plan (명시적 --allow-create 필요)
 bash infra/scripts/terraform-plan.sh staging --allow-create
 
-# 3) apply (대화형 확인)
+# 4) apply (대화형 확인)
 bash infra/scripts/terraform-apply.sh staging --allow-create
 
-# 4) prod apply (추가 보호장치)
+# 5) prod apply (추가 보호장치)
 bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
 ```
 

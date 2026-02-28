@@ -3,16 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="${SCRIPT_DIR}/../terraform"
+PREFLIGHT_SCRIPT="${SCRIPT_DIR}/terraform-preflight-validate.sh"
 
 usage() {
   cat <<USAGE
 Usage:
-  $(basename "$0") <dev|staging|prod> [--allow-create] [--out <plan-file>]
+  $(basename "$0") <dev|staging|prod> [--allow-create] [--out <plan-file>] [--skip-preflight]
 
 Options:
   --allow-create    Terraform plan 시 allow_resource_creation=true로 실행
                     (기본값 false: 안전 모드)
   --out <file>      plan output 파일 경로 (기본: infra/terraform/plans/<env>.tfplan)
+  --skip-preflight  내부 옵션 (apply 스크립트에서 preflight 중복 실행 방지)
   -h, --help        도움말 출력
 
 Examples:
@@ -31,6 +33,7 @@ shift
 
 ALLOW_CREATE="false"
 PLAN_OUT=""
+SKIP_PREFLIGHT="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       }
       PLAN_OUT="$2"
       shift 2
+      ;;
+    --skip-preflight)
+      SKIP_PREFLIGHT="true"
+      shift
       ;;
     -h|--help)
       usage
@@ -65,6 +72,16 @@ case "$ENVIRONMENT" in
     exit 1
     ;;
 esac
+
+if [[ "$SKIP_PREFLIGHT" != "true" ]]; then
+  if [[ ! -x "$PREFLIGHT_SCRIPT" ]]; then
+    echo "❌ preflight 스크립트를 실행할 수 없습니다: $PREFLIGHT_SCRIPT" >&2
+    exit 1
+  fi
+
+  echo "▶ Terraform preflight validation"
+  "$PREFLIGHT_SCRIPT" "$ENVIRONMENT"
+fi
 
 if ! command -v terraform >/dev/null 2>&1; then
   echo "❌ terraform CLI를 찾을 수 없습니다. 설치 후 다시 실행하세요." >&2

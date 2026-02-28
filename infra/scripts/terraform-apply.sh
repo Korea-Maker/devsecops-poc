@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="${SCRIPT_DIR}/../terraform"
 PLAN_SCRIPT="${SCRIPT_DIR}/terraform-plan.sh"
+PREFLIGHT_SCRIPT="${SCRIPT_DIR}/terraform-preflight-validate.sh"
 
 usage() {
   cat <<USAGE
@@ -12,6 +13,7 @@ Usage:
 
 Safety guards:
   - 환경 인자(dev|staging|prod) 필수
+  - apply 전 preflight 완전성 검증
   - apply 전 항상 대화형 확인
   - production(prod) apply는 --allow-prod 없으면 즉시 거부
 
@@ -83,13 +85,13 @@ if [[ "$ENVIRONMENT" == "prod" && "$ALLOW_PROD" != "true" ]]; then
   exit 1
 fi
 
-if ! command -v terraform >/dev/null 2>&1; then
-  echo "❌ terraform CLI를 찾을 수 없습니다. 설치 후 다시 실행하세요." >&2
+if [[ ! -x "$PLAN_SCRIPT" ]]; then
+  echo "❌ plan 스크립트를 실행할 수 없습니다: $PLAN_SCRIPT" >&2
   exit 1
 fi
 
-if [[ ! -x "$PLAN_SCRIPT" ]]; then
-  echo "❌ plan 스크립트를 실행할 수 없습니다: $PLAN_SCRIPT" >&2
+if [[ ! -x "$PREFLIGHT_SCRIPT" ]]; then
+  echo "❌ preflight 스크립트를 실행할 수 없습니다: $PREFLIGHT_SCRIPT" >&2
   exit 1
 fi
 
@@ -106,11 +108,19 @@ else
   PLAN_FILE_ABS="$(cd "$PLAN_DIR" && pwd)/$(basename "$PLAN_FILE")"
 fi
 
+echo "▶ 0) preflight validation"
+"$PREFLIGHT_SCRIPT" "$ENVIRONMENT"
+
+if ! command -v terraform >/dev/null 2>&1; then
+  echo "❌ terraform CLI를 찾을 수 없습니다. 설치 후 다시 실행하세요." >&2
+  exit 1
+fi
+
 echo "▶ 1) apply 대상 plan 생성"
 if [[ "$ALLOW_CREATE" == "true" ]]; then
-  "$PLAN_SCRIPT" "$ENVIRONMENT" --allow-create --out "$PLAN_FILE_ABS"
+  "$PLAN_SCRIPT" "$ENVIRONMENT" --allow-create --out "$PLAN_FILE_ABS" --skip-preflight
 else
-  "$PLAN_SCRIPT" "$ENVIRONMENT" --out "$PLAN_FILE_ABS"
+  "$PLAN_SCRIPT" "$ENVIRONMENT" --out "$PLAN_FILE_ABS" --skip-preflight
 fi
 
 echo

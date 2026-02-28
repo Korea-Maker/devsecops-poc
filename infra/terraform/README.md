@@ -1,10 +1,11 @@
-# Terraform 운영 가이드 (Ops MVP Phase O)
+# Terraform 운영 가이드 (Ops MVP Phase O + P)
 
 이 디렉터리는 **safe-by-default** 원칙으로 설계된 Terraform skeleton이다.
 
 - 기본값으로는 리소스가 생성되지 않는다.
 - `terraform apply`를 실행해도 `allow_resource_creation=false`이면 no-op 계획이 나온다.
 - 실제 생성은 **명시적 create 스위치 + 모듈 토글 + apply 확인**이 모두 필요하다.
+- `terraform-plan.sh`/`terraform-apply.sh`는 실행 전 `terraform-preflight-validate.sh`로 값/템플릿 완전성을 먼저 검증한다.
 
 ---
 
@@ -15,10 +16,16 @@ infra/terraform/
 ├── main.tf
 ├── variables.tf
 ├── outputs.tf
+├── DRY_RUN_REHEARSAL_CHECKLIST.md
 ├── environments/
 │   ├── dev.tfvars
 │   ├── staging.tfvars
-│   └── prod.tfvars
+│   ├── prod.tfvars
+│   └── templates/
+│       ├── README.md
+│       ├── dev.values.tfvars.template
+│       ├── staging.values.tfvars.template
+│       └── prod.values.tfvars.template
 ├── modules/
 │   ├── vpc/
 │   ├── rds/
@@ -46,19 +53,25 @@ infra/terraform/
 
 ## 권장 실행 순서
 
-### 1) 계획 확인 (안전 모드, 생성 없음)
+### 1) 값/템플릿 preflight 검증
+
+```bash
+bash infra/scripts/terraform-preflight-validate.sh staging
+```
+
+### 2) 계획 확인 (안전 모드, 생성 없음)
 
 ```bash
 bash infra/scripts/terraform-plan.sh staging
 ```
 
-### 2) 생성 포함 계획 확인
+### 3) 생성 포함 계획 확인
 
 ```bash
 bash infra/scripts/terraform-plan.sh staging --allow-create
 ```
 
-### 3) 적용 (대화형 확인)
+### 4) 적용 (대화형 확인)
 
 ```bash
 # no-op apply (기본 안전모드)
@@ -68,7 +81,7 @@ bash infra/scripts/terraform-apply.sh staging
 bash infra/scripts/terraform-apply.sh staging --allow-create
 ```
 
-### 4) 프로덕션 적용 (추가 가드)
+### 5) 프로덕션 적용 (추가 가드)
 
 ```bash
 # --allow-prod 없으면 즉시 거부됨
@@ -79,10 +92,18 @@ bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
 
 ---
 
+## Dry-run rehearsal 문서
+
+- 체크리스트: [`DRY_RUN_REHEARSAL_CHECKLIST.md`](./DRY_RUN_REHEARSAL_CHECKLIST.md)
+- 환경 템플릿: [`environments/templates/`](./environments/templates/)
+
+---
+
 ## CI 정책
 
-PR에서는 `.github/workflows/terraform-pr-checks.yml`에서 다음만 수행한다.
+PR에서는 `.github/workflows/terraform-pr-checks.yml`에서 다음을 수행한다.
 
+- (optional/non-blocking) `terraform-preflight-validate.sh all --ci`
 - `terraform fmt -check -recursive`
 - `terraform validate` (backend=false init)
 - `terraform plan` (staging tfvars, `allow_resource_creation=false`, creds가 있을 때만)

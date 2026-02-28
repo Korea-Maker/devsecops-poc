@@ -13,6 +13,17 @@ permissions:
   contents: read
 
 jobs:
+  preflight-readiness:
+    name: Terraform value preflight (optional)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Terraform value/template preflight
+        run: bash infra/scripts/terraform-preflight-validate.sh all --ci
+
   terraform-checks:
     name: Terraform fmt/validate/plan (safe)
     runs-on: ubuntu-latest

@@ -301,10 +301,12 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
   - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
 - Terraform 스크립트 계약
-  - `infra/scripts/terraform-plan.sh <dev|staging|prod>`: 환경 인자 필수
+  - `infra/scripts/terraform-preflight-validate.sh <env|all>`: tfvars + template 완전성 검증
+  - `infra/scripts/terraform-plan.sh <dev|staging|prod>`: 환경 인자 필수 (preflight 자동 실행)
   - `infra/scripts/terraform-plan.sh <env> --allow-create`: 리소스 생성 plan 명시 허용
-  - `infra/scripts/terraform-apply.sh <env>`: 대화형 확인 후 apply
+  - `infra/scripts/terraform-apply.sh <env>`: preflight + 대화형 확인 후 apply
   - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 실행 거부
+  - 리허설 체크리스트: `infra/terraform/DRY_RUN_REHEARSAL_CHECKLIST.md`
 
 ### PostgreSQL Tenant RLS enablement / rollback runbook (Ops MVP Phase K)
 

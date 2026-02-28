@@ -1,26 +1,30 @@
-# Development environment example
+# Environment readiness value template (dev)
+# - 이 파일은 dry-run rehearsal 준비용 템플릿이다.
+# - 값을 채운 뒤 infra/terraform/environments/dev.tfvars로 반영한다.
+# - 시크릿(비밀번호/토큰/키)은 절대 저장하지 않는다.
 
+# section:core
 environment  = "dev"
 aws_region   = "ap-northeast-2"
 project_name = "devsecops-poc"
 
-# Safety gate (default false)
+# Safety gate (기본 false)
 allow_resource_creation = false
 
-# Module toggles (default false)
+# Module toggles (기본 false)
 enable_vpc = false
 enable_rds = false
 enable_ecs = false
 enable_s3  = false
 
-# Networking
+# section:network
 vpc_cidr             = "10.20.0.0/16"
 availability_zones   = ["ap-northeast-2a", "ap-northeast-2c"]
 public_subnet_cidrs  = ["10.20.0.0/24", "10.20.1.0/24"]
 private_subnet_cidrs = ["10.20.10.0/24", "10.20.11.0/24"]
 enable_nat_gateway   = false
 
-# RDS
+# section:db
 db_name                      = "devsecops"
 db_instance_class            = "db.t4g.micro"
 db_allocated_storage         = 20
@@ -34,16 +38,16 @@ db_master_username           = "app_admin"
 db_master_password           = null
 db_engine_version            = "15.5"
 
-# ECS
+# section:ecs
 ecs_desired_count             = 1
 ecs_enable_container_insights = false
 ecs_enable_alb                = false
 ecs_alb_ingress_cidrs         = ["0.0.0.0/0"]
 ecs_log_retention_days        = 7
 
-# S3
-s3_artifacts_bucket_name      = ""
-s3_logs_bucket_name           = ""
+# section:s3
+s3_artifacts_bucket_name      = "<optional-dev-artifacts-bucket-or-empty>"
+s3_logs_bucket_name           = "<optional-dev-logs-bucket-or-empty>"
 s3_force_destroy              = false
 s3_enable_versioning          = true
 s3_noncurrent_expiration_days = 14
@@ -53,7 +57,12 @@ tags = {
   Environment = "dev"
 }
 
-# NOTE:
-# 실제 리소스를 만들려면 아래 2가지를 모두 충족해야 함
-# 1) allow_resource_creation=true
-# 2) 필요한 module toggle(enable_vpc 등)=true
+# section:operational-notes
+# ops_owner = "<담당자/팀>"
+# reviewer = "<승인자>"
+# rehearsal_window_kst = "<YYYY-MM-DD HH:MM~HH:MM>"
+# rollback_owner = "<롤백 담당자>"
+# rollback_plan = "<롤백 단계 요약>"
+# verification_points = "<헬스체크, terraform outputs, CloudWatch 확인 등>"
+# communication_channel = "<Slack/Telegram 채널>"
+# ticket_reference = "<Jira/Notion 링크>"

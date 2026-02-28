@@ -234,10 +234,12 @@ aws ecs describe-services \
   - header 포맷: `Header: value|Header-2: value` (`Authorization: Bearer ...` 포함 가능)
   - optional: `RLS_CANARY_EXPECT_ALLOWED_STATUS`(기본 `200`), `RLS_CANARY_EXPECT_DENIED_STATUSES`(기본 `401,403,404`), `RLS_CANARY_TIMEOUT_SECONDS`
 - Terraform 스크립트 계약
-  - `infra/scripts/terraform-plan.sh <env>`: `dev|staging|prod` 환경 인자 필수
+  - `infra/scripts/terraform-preflight-validate.sh <env|all>`: tfvars + template 완전성 검증
+  - `infra/scripts/terraform-plan.sh <env>`: `dev|staging|prod` 환경 인자 필수 (preflight 자동 실행)
   - `infra/scripts/terraform-plan.sh <env> --allow-create`: 명시적으로 create plan 허용
-  - `infra/scripts/terraform-apply.sh <env>`: apply 전 대화형 확인
+  - `infra/scripts/terraform-apply.sh <env>`: preflight + apply 전 대화형 확인
   - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 즉시 거부
+  - 리허설 런북: `infra/terraform/DRY_RUN_REHEARSAL_CHECKLIST.md`
 
 
 ### Terraform IaC 실행 절차 (safe-by-default)
@@ -248,14 +250,17 @@ terraform -chdir=infra/terraform fmt -recursive
 terraform -chdir=infra/terraform init -backend=false
 terraform -chdir=infra/terraform validate
 
-# 2) 안전 모드 plan (기본)
+# 2) 값/템플릿 preflight
+bash infra/scripts/terraform-preflight-validate.sh staging
+
+# 3) 안전 모드 plan (기본)
 bash infra/scripts/terraform-plan.sh staging
 
-# 3) 생성 포함 plan/apply (명시적으로만)
+# 4) 생성 포함 plan/apply (명시적으로만)
 bash infra/scripts/terraform-plan.sh staging --allow-create
 bash infra/scripts/terraform-apply.sh staging --allow-create
 
-# 4) production apply (추가 플래그 + 확인 문자열)
+# 5) production apply (추가 플래그 + 확인 문자열)
 bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
 ```
 
