@@ -110,6 +110,117 @@ describe("data backend config", () => {
     expect(getActiveDataBackend()).toBe("memory");
   });
 
+  it("schema migration은 순서대로 한 번만 적용되어야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const appliedVersions = new Set<string>();
+    const mock = createMockSqlClient((sql, values) => {
+      if (sql.includes("SELECT version") && sql.includes("FROM schema_migrations")) {
+        return Array.from(appliedVersions)
+          .sort()
+          .map((version) => ({ version, applied_at: "2026-03-01T00:00:00.000Z" }));
+      }
+
+      if (sql.includes("INSERT INTO schema_migrations")) {
+        appliedVersions.add(String(values?.[0]));
+      }
+
+      return [];
+    });
+
+    const createSqlClient = () => mock.client;
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient,
+    });
+
+    await resetDataBackendForTests();
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient,
+    });
+
+    const insertedMigrationVersions = mock.query.mock.calls
+      .filter(([sql]) => String(sql).includes("INSERT INTO schema_migrations"))
+      .map(([, values]) => String(values?.[0]));
+
+    expect(insertedMigrationVersions).toEqual([
+      "001_scans",
+      "002_tenants",
+      "003_scan_queue",
+    ]);
+
+    const scansTableCreateStatements = mock.query.mock.calls.filter(([sql]) =>
+      String(sql).includes("CREATE TABLE IF NOT EXISTS scans")
+    );
+    expect(scansTableCreateStatements).toHaveLength(1);
+  });
+
+  it("startup 시 running 상태로 멈춘 scan을 queued로 복구하고 queue에 재적재해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const queueRows: Array<{ scan_id: string; position: number }> = [];
+
+    const mock = createMockSqlClient((sql, values) => {
+      if (sql.includes("UPDATE scans") && sql.includes("WHERE status = 'running'")) {
+        return [{ id: "scan-running-1" }];
+      }
+
+      if (sql.includes("INSERT INTO scan_queue_jobs")) {
+        const scanId = String(values?.[0] ?? "");
+        queueRows.push({ scan_id: scanId, position: queueRows.length + 1 });
+        return [];
+      }
+
+      if (sql.includes("FROM scan_queue_jobs")) {
+        return queueRows;
+      }
+
+      if (sql.includes("FROM scans")) {
+        return [
+          {
+            id: "scan-running-1",
+            tenant_id: "tenant-a",
+            engine: "semgrep",
+            repo_url: "https://github.com/test/repo-running-recovery",
+            branch: "main",
+            status: "queued",
+            created_at: "2026-03-01T00:00:00.000Z",
+            completed_at: null,
+            retry_count: 1,
+            last_error: null,
+            last_error_code: null,
+            findings: null,
+          },
+        ];
+      }
+
+      return [];
+    });
+
+    const result = await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    expect(result.activeBackend).toBe("postgres");
+    expect(result.persistedState.scans).toHaveLength(1);
+    expect(result.persistedState.scans[0]?.status).toBe("queued");
+    expect(result.persistedState.scans[0]?.tenantId).toBe("tenant-a");
+    expect(result.persistedState.queue.queuedScanIds).toEqual(["scan-running-1"]);
+
+    const hasRecoveryUpdateQuery = mock.query.mock.calls.some(([sql]) => {
+      const statement = String(sql);
+      return statement.includes("UPDATE scans") && statement.includes("WHERE status = 'running'");
+    });
+
+    expect(hasRecoveryUpdateQuery).toBe(true);
+  });
+
   it("postgres 초기화 시 queue/dead-letter 상태를 hydrate 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
     process.env.DATABASE_URL = "postgresql://example/devsecops";

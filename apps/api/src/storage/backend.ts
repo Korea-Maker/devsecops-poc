@@ -214,107 +214,222 @@ async function closeSqlClient(): Promise<void> {
   }
 }
 
-async function ensureBootstrapSchema(client: SqlClient): Promise<void> {
+interface SchemaMigrationRow extends QueryResultRow {
+  version: string;
+  applied_at: string;
+}
+
+interface RecoveredRunningScanRow extends QueryResultRow {
+  id: string;
+}
+
+interface SchemaMigration {
+  version: string;
+  apply: (client: SqlClient) => Promise<void>;
+}
+
+function createSqlMigration(
+  version: string,
+  statements: readonly string[]
+): SchemaMigration {
+  return {
+    version,
+    apply: async (client) => {
+      for (const statement of statements) {
+        await client.query(statement);
+      }
+    },
+  };
+}
+
+const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
+  createSqlMigration("001_scans", [
+    `
+      CREATE TABLE IF NOT EXISTS scans (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        repo_url TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_error_code TEXT,
+        findings JSONB
+      )
+    `,
+    "CREATE INDEX IF NOT EXISTS idx_scans_tenant_id_status ON scans (tenant_id, status)",
+  ]),
+  {
+    version: "002_tenants",
+    apply: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS organizations (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL
+        )
+      `);
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS organization_memberships (
+          organization_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (organization_id, user_id)
+        )
+      `);
+
+      await client.query(
+        "CREATE INDEX IF NOT EXISTS idx_org_memberships_org_id ON organization_memberships (organization_id)"
+      );
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS tenant_audit_logs (
+          id TEXT PRIMARY KEY,
+          organization_id TEXT NOT NULL,
+          actor_user_id TEXT,
+          action TEXT NOT NULL,
+          target_user_id TEXT,
+          details JSONB,
+          created_at TEXT NOT NULL
+        )
+      `);
+
+      await client.query(
+        "CREATE INDEX IF NOT EXISTS idx_tenant_audit_org_created_at ON tenant_audit_logs (organization_id, created_at DESC)"
+      );
+
+      await client.query(
+        `
+          INSERT INTO organizations (id, name, slug, created_at)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT DO NOTHING
+        `,
+        [
+          DEFAULT_TENANT_ID,
+          DEFAULT_ORGANIZATION_NAME,
+          DEFAULT_ORGANIZATION_SLUG,
+          new Date().toISOString(),
+        ]
+      );
+    },
+  },
+  createSqlMigration("003_scan_queue", [
+    `
+      CREATE TABLE IF NOT EXISTS scan_queue_jobs (
+        position BIGSERIAL PRIMARY KEY,
+        scan_id TEXT NOT NULL
+      )
+    `,
+    "CREATE INDEX IF NOT EXISTS idx_scan_queue_jobs_scan_id ON scan_queue_jobs (scan_id)",
+    `
+      CREATE TABLE IF NOT EXISTS scan_dead_letters (
+        id BIGSERIAL PRIMARY KEY,
+        scan_id TEXT NOT NULL,
+        retry_count INTEGER NOT NULL,
+        error TEXT NOT NULL,
+        code TEXT,
+        failed_at TEXT NOT NULL
+      )
+    `,
+    "CREATE INDEX IF NOT EXISTS idx_scan_dead_letters_scan_id ON scan_dead_letters (scan_id)",
+  ]),
+];
+
+async function ensureSchemaMigrationsTable(client: SqlClient): Promise<void> {
   await client.query(`
-    CREATE TABLE IF NOT EXISTS scans (
-      id TEXT PRIMARY KEY,
-      tenant_id TEXT NOT NULL,
-      engine TEXT NOT NULL,
-      repo_url TEXT NOT NULL,
-      branch TEXT NOT NULL,
-      status TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      completed_at TEXT,
-      retry_count INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      last_error_code TEXT,
-      findings JSONB
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
     )
   `);
+}
 
-  await client.query(
-    "CREATE INDEX IF NOT EXISTS idx_scans_tenant_id_status ON scans (tenant_id, status)"
+async function readAppliedMigrationVersions(client: SqlClient): Promise<Set<string>> {
+  const result = await client.query<SchemaMigrationRow>(
+    `
+      SELECT version, applied_at
+      FROM schema_migrations
+      ORDER BY version ASC
+    `
   );
 
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS organizations (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      slug TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL
-    )
-  `);
+  return new Set(result.rows.map((row) => row.version));
+}
 
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS organization_memberships (
-      organization_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (organization_id, user_id)
-    )
-  `);
-
-  await client.query(
-    "CREATE INDEX IF NOT EXISTS idx_org_memberships_org_id ON organization_memberships (organization_id)"
-  );
-
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS tenant_audit_logs (
-      id TEXT PRIMARY KEY,
-      organization_id TEXT NOT NULL,
-      actor_user_id TEXT,
-      action TEXT NOT NULL,
-      target_user_id TEXT,
-      details JSONB,
-      created_at TEXT NOT NULL
-    )
-  `);
-
-  await client.query(
-    "CREATE INDEX IF NOT EXISTS idx_tenant_audit_org_created_at ON tenant_audit_logs (organization_id, created_at DESC)"
-  );
-
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS scan_queue_jobs (
-      position BIGSERIAL PRIMARY KEY,
-      scan_id TEXT NOT NULL
-    )
-  `);
-
-  await client.query(
-    "CREATE INDEX IF NOT EXISTS idx_scan_queue_jobs_scan_id ON scan_queue_jobs (scan_id)"
-  );
-
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS scan_dead_letters (
-      id BIGSERIAL PRIMARY KEY,
-      scan_id TEXT NOT NULL,
-      retry_count INTEGER NOT NULL,
-      error TEXT NOT NULL,
-      code TEXT,
-      failed_at TEXT NOT NULL
-    )
-  `);
-
-  await client.query(
-    "CREATE INDEX IF NOT EXISTS idx_scan_dead_letters_scan_id ON scan_dead_letters (scan_id)"
-  );
-
+async function markMigrationApplied(client: SqlClient, version: string): Promise<void> {
   await client.query(
     `
-      INSERT INTO organizations (id, name, slug, created_at)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT DO NOTHING
+      INSERT INTO schema_migrations (version, applied_at)
+      VALUES ($1, $2)
+      ON CONFLICT (version) DO NOTHING
     `,
-    [
-      DEFAULT_TENANT_ID,
-      DEFAULT_ORGANIZATION_NAME,
-      DEFAULT_ORGANIZATION_SLUG,
-      new Date().toISOString(),
-    ]
+    [version, new Date().toISOString()]
   );
+}
+
+async function applySchemaMigrations(client: SqlClient): Promise<void> {
+  await ensureSchemaMigrationsTable(client);
+
+  const appliedVersions = await readAppliedMigrationVersions(client);
+
+  for (const migration of SCHEMA_MIGRATIONS) {
+    if (appliedVersions.has(migration.version)) {
+      continue;
+    }
+
+    await migration.apply(client);
+    await markMigrationApplied(client, migration.version);
+    appliedVersions.add(migration.version);
+  }
+}
+
+async function recoverInterruptedRunningScans(client: SqlClient): Promise<number> {
+  const recoveredRunningScansResult = await client.query<RecoveredRunningScanRow>(
+    `
+      UPDATE scans
+      SET status = 'queued', completed_at = NULL
+      WHERE status = 'running'
+      RETURNING id
+    `
+  );
+
+  if (recoveredRunningScansResult.rows.length === 0) {
+    return 0;
+  }
+
+  const queueJobsResult = await client.query<ScanQueueJobRow>(
+    `
+      SELECT scan_id, position
+      FROM scan_queue_jobs
+      ORDER BY position ASC
+    `
+  );
+
+  const queuedScanIdSet = new Set(queueJobsResult.rows.map((row) => row.scan_id));
+
+  for (const row of recoveredRunningScansResult.rows) {
+    if (queuedScanIdSet.has(row.id)) {
+      continue;
+    }
+
+    await client.query(
+      `
+        INSERT INTO scan_queue_jobs (scan_id)
+        VALUES ($1)
+      `,
+      [row.id]
+    );
+    queuedScanIdSet.add(row.id);
+  }
+
+  return recoveredRunningScansResult.rows.length;
 }
 
 function toObjectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -557,20 +672,22 @@ export async function initializeDataBackend(
 
     try {
       candidateClient = createSqlClient(databaseUrl);
-      await ensureBootstrapSchema(candidateClient);
+      await applySchemaMigrations(candidateClient);
+      const recoveredRunningScans = await recoverInterruptedRunningScans(candidateClient);
       const persistedState = await readPersistedState(candidateClient);
 
       sqlClient = candidateClient;
       candidateClient = null;
       activeBackend = "postgres";
       info(
-        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d)",
+        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, recoveredRunning=%d)",
         persistedState.scans.length,
         persistedState.organizations.length,
         persistedState.memberships.length,
         persistedState.tenantAuditLogs.length,
         persistedState.queue.queuedScanIds.length,
-        persistedState.queue.deadLetters.length
+        persistedState.queue.deadLetters.length,
+        recoveredRunningScans
       );
 
       return {

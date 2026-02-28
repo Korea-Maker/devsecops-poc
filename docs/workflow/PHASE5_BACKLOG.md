@@ -54,8 +54,9 @@
 - [x] 데이터 저장 백엔드 추상화 + PostgreSQL 영속화 (Ops MVP)
   - 신규 환경변수: `DATA_BACKEND=memory|postgres` (기본 `memory`)
   - `DATA_BACKEND=postgres`에서 `DATABASE_URL` 기반 연결/초기화
-  - 부팅 시 bootstrap SQL 실행(`CREATE TABLE IF NOT EXISTS`)으로 테이블 누락에도 안전 기동
+  - 부팅 시 `schema_migrations` 기반 versioned migration 순차/멱등 적용
   - 부팅 hydration으로 scans/queue/dead-letter/organizations/memberships/tenant audit logs를 인메모리 스토어로 복원
+  - startup recovery: 이전 비정상 종료로 `running`에 남은 scan을 `queued`로 전환하고 queue에 재적재
   - 쓰기 경로 upsert/delete + queue snapshot 저장으로 위 엔티티 영속화(기존 API 계약/응답 shape 유지)
   - postgres 초기화 실패 시 자동 memory fallback(서비스 기동 우선)
 
@@ -76,6 +77,7 @@
     - `AUTH_MODE` fallback + JWT 모드 필수 구성 검증
     - JWT 모드 invalid token/header/JWKS 케이스(401/503 계약)
     - tenant 격리(list/get), queue/dead-letter admin 권한 검사
+    - startup running-scan recovery + schema migration idempotent/apply-order 검증
   - 문서 갱신:
     - `README.md` 인증 모드/환경변수/제약 업데이트
     - `docs/architecture/AUTH_TRANSITION.md` 신규 추가(경계, trust model, rollout)
@@ -87,8 +89,7 @@
 - [ ] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정
 - [ ] OAuth/OIDC 로그인 플로우(웹) 연동 및 토큰 발급 체계 연결
 - [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
-- [ ] 비정상 크래시 시 in-flight 작업/재시도 타이머의 즉시 복구 전략 고도화 (현재는 graceful shutdown 경로 우선 보장)
-- [ ] DB migration 버저닝/운영 마이그레이션 체계 정비
+- [ ] 비정상 크래시 시 retry timer 대기 작업의 정밀 복구(backoff 시점 보존) 전략 고도화
 - [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화
