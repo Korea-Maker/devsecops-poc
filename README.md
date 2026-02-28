@@ -52,6 +52,9 @@
 ### API (`apps/api`)
 
 - `GET /health` → `{ ok: true, service: "api" }`
+- `GET /api/v1/auth/jwks` → 플랫폼 access token 검증용 공개 JWKS
+- `GET /api/v1/auth/google/start` → OIDC state/nonce 생성 + Google authorize URL 반환
+- `GET /api/v1/auth/google/callback` → state 검증 + code 교환 + Google id_token 검증 + membership 매핑 + 플랫폼 JWT 발급
 - `POST /api/v1/scans` → 스캔 요청 생성 + 큐 적재 (`202 Accepted`)
   - `repoUrl` 입력 계약: 로컬 디렉터리 경로 또는 `http/https/ssh/file://`, `git@...` 형식 허용 (`ftp://` 등 미지원 스킴/빈 문자열은 거부)
   - 멀티테넌시 활성화 시 요청 tenant context(`x-tenant-id`)를 스캔 레코드에 저장
@@ -100,6 +103,22 @@
   - 검증/클레임 실패 시 401 + `{ error, code }`
 - queue/dead-letter 수동 운영 API(`queue/status`, `queue/process-next`, `dead-letters`, `redrive`)는 `admin` 이상(role hierarchy: `owner > admin > member > viewer`)만 접근 가능
 
+OIDC 로그인 + 플랫폼 토큰 발급 계약:
+
+- `google/start` 응답(JSON)에서 `authorizationUrl`, `state`를 받고 사용자 브라우저를 Google 로그인으로 이동
+- Google callback(`code`, `state`)을 API가 처리해 자체 플랫폼 JWT(access token) 반환
+- membership 매핑 규칙:
+  - 1차: Google `sub`로 membership 조회
+  - fallback: `sub` 미매칭 + `email` 존재 시 `email`로 조회
+  - 0개: `403 AUTH_MEMBERSHIP_NOT_FOUND`
+  - 1개: 해당 tenant 사용
+  - 2개 이상: `tenantId` query 필수 (`AUTH_TENANT_ID_REQUIRED`)
+- 플랫폼 JWT 클레임:
+  - `tenant_id`, `sub`(membership user id), `role`, `iss`, `aud`, `exp`
+- 플랫폼 서명 키:
+  - `PLATFORM_JWT_PRIVATE_KEY_PEM` + `PLATFORM_JWT_PUBLIC_KEY_PEM` 설정 시 해당 키 사용
+  - 키가 없거나 불완전하면 부팅 시 임시 RS256 키 생성(경고 로그 출력, 재시작 시 기존 토큰 무효화)
+
 스캔 워커 동작:
 
 - 기본 실행 모드: `SCAN_EXECUTION_MODE=mock` (미설정/비정상 값 포함)
@@ -139,6 +158,15 @@
 - `JWT_ISSUER`: JWT issuer (`AUTH_MODE=jwt`에서 필수)
 - `JWT_AUDIENCE`: JWT audience (`AUTH_MODE=jwt`에서 필수)
 - `JWT_JWKS_URL`: JWT JWKS endpoint (`AUTH_MODE=jwt`에서 필수, http/https)
+- `OIDC_GOOGLE_CLIENT_ID`: Google OAuth client id (`/api/v1/auth/google/*`에서 필수)
+- `OIDC_GOOGLE_CLIENT_SECRET`: Google OAuth client secret (`/api/v1/auth/google/*`에서 필수)
+- `OIDC_GOOGLE_REDIRECT_URI`: Google OAuth redirect URI (`/api/v1/auth/google/*`에서 필수)
+- `PLATFORM_JWT_PRIVATE_KEY_PEM`: 플랫폼 access token 서명 개인키(PEM)
+- `PLATFORM_JWT_PUBLIC_KEY_PEM`: 플랫폼 access token 공개키(PEM, JWKS 노출용)
+- `PLATFORM_JWT_KID`: 플랫폼 JWKS key id
+- `PLATFORM_JWT_ISSUER`: 플랫폼 access token issuer (기본값 `https://devsecops.local`)
+- `PLATFORM_JWT_AUDIENCE`: 플랫폼 access token audience (기본값 `devsecops-api`)
+- `PLATFORM_JWT_ACCESS_TTL_SEC`: 플랫폼 access token 만료(초, 기본값 `3600`)
 
 ### 운영/관리 API 사용 예시
 
@@ -256,7 +284,7 @@ pnpm --filter @devsecops/web build
 
 - **재기동 한계(잔여)**: startup recovery로 `running` 스캔은 자동 복구되지만, 비정상 크래시 시 retry timer 대기 중 작업의 정확한 backoff 시점 복원은 보장하지 않음
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
-- **인증 제한**: JWT 검증은 구현되었지만 Google SSO/OAuth 로그인(웹 세션 발급), 토큰 회전 자동화, IdP 운영 가이드는 후속 구현 필요
+- **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체

@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Fastify, { type FastifyInstance } from "fastify";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
@@ -710,10 +709,10 @@ describe("Scans API", () => {
   });
 
   describe("Tenant auth mode (jwt)", () => {
-    let jwksServer: FastifyInstance;
-    let jwksUrl = "";
+    const jwksUrl = "https://issuer.example.com/.well-known/jwks.json";
     let signingKey!: CryptoKey;
     let invalidSigningKey!: CryptoKey;
+    let originalFetch: typeof global.fetch;
 
     const jwtIssuer = "https://issuer.example.com";
     const jwtAudience = "devsecops-api";
@@ -738,20 +737,28 @@ describe("Scans API", () => {
       publicJwk.use = "sig";
       publicJwk.alg = "RS256";
 
-      jwksServer = Fastify({ logger: false });
-      jwksServer.get("/.well-known/jwks.json", async () => ({
-        keys: [publicJwk],
-      }));
+      originalFetch = global.fetch;
+      global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const requestUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
 
-      const listeningOrigin = await jwksServer.listen({
-        port: 0,
-        host: "127.0.0.1",
-      });
-      jwksUrl = `${listeningOrigin}/.well-known/jwks.json`;
+        if (requestUrl === jwksUrl) {
+          return new Response(JSON.stringify({ keys: [publicJwk] }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          });
+        }
+
+        return originalFetch(input as RequestInfo, init);
+      }) as typeof fetch;
     });
 
     afterAll(async () => {
-      await jwksServer.close();
+      global.fetch = originalFetch;
     });
 
     beforeEach(() => {

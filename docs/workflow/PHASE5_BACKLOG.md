@@ -87,7 +87,13 @@
 ## 아직 남은 작업 (Phase 5 후속)
 
 - [ ] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정
-- [ ] OAuth/OIDC 로그인 플로우(웹) 연동 및 토큰 발급 체계 연결
+- [x] OAuth/OIDC 로그인 API 콜백 + 플랫폼 토큰 발급 체계 연결 (Ops MVP Phase E)
+  - 신규 API:
+    - `GET /api/v1/auth/jwks`
+    - `GET /api/v1/auth/google/start`
+    - `GET /api/v1/auth/google/callback`
+  - membership 매핑: `sub` 우선 + `email` fallback, 복수 membership 시 `tenantId` 필수
+  - 플랫폼 JWT: RS256 + JWKS(`kid`) 노출, env 키 우선/미설정 시 ephemeral 키 생성 경고
 - [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [ ] 비정상 크래시 시 retry timer 대기 작업의 정밀 복구(backoff 시점 보존) 전략 고도화
 - [ ] tenant 인덱싱/행 수준 격리(RLS) 설계

@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { healthRoutes } from "./routes/health.js";
 import { scanRoutes } from "./routes/scans.js";
 import { githubRoutes } from "./routes/github.js";
+import { authRoutes } from "./routes/auth.js";
 import { tenantRoutes } from "./routes/tenants.js";
 import {
   initializeDataBackend,
@@ -34,6 +35,7 @@ export function buildApp() {
   });
 
   app.register(healthRoutes);
+  app.register(authRoutes);
   app.register(scanRoutes);
   app.register(githubRoutes);
   app.register(tenantRoutes);
