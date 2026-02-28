@@ -55,8 +55,10 @@
   - 신규 환경변수: `DATA_BACKEND=memory|postgres` (기본 `memory`)
   - `DATA_BACKEND=postgres`에서 `DATABASE_URL` 기반 연결/초기화
   - 부팅 시 `schema_migrations` 기반 versioned migration 순차/멱등 적용
-  - 부팅 hydration으로 scans/queue/dead-letter/organizations/memberships/tenant audit logs를 인메모리 스토어로 복원
-  - startup recovery: 이전 비정상 종료로 `running`에 남은 scan을 `queued`로 전환하고 queue에 재적재
+  - 부팅 hydration으로 scans/queue/dead-letter/retry schedule/organizations/memberships/tenant audit logs를 인메모리 스토어로 복원
+  - startup recovery:
+    - 이전 비정상 종료로 `running`에 남은 scan을 `queued`로 전환하고 queue에 재적재
+    - retry schedule(`scanId`,`dueAt`)은 `dueAt<=now` 즉시 enqueue, 미래 시점은 남은 delay로 재타이머링
   - 쓰기 경로 upsert/delete + queue snapshot 저장으로 위 엔티티 영속화(기존 API 계약/응답 shape 유지)
   - postgres 초기화 실패 시 자동 memory fallback(서비스 기동 우선)
 
@@ -95,7 +97,7 @@
   - membership 매핑: `sub` 우선 + `email` fallback, 복수 membership 시 `tenantId` 필수
   - 플랫폼 JWT: RS256 + JWKS(`kid`) 노출, env 키 우선/미설정 시 ephemeral 키 생성 경고
 - [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
-- [ ] 비정상 크래시 시 retry timer 대기 작업의 정밀 복구(backoff 시점 보존) 전략 고도화
+- [ ] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화

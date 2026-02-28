@@ -128,6 +128,10 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - 원격 저장소 URL(`http/https/ssh/git@/file://`)이면 스캔 전 임시 디렉터리에 `git clone --depth 1 --branch <branch>` 수행
   - 어댑터에는 clone된 로컬 경로를 전달해 CLI를 실행하고, 처리 성공/실패와 무관하게 임시 clone 정리(cleanup)
 - 실패 처리: retry + exponential backoff + dead-letter 지원
+- retry timer 운영:
+  - retry 스케줄(`scanId`, `dueAt`)을 queue snapshot에 함께 저장
+  - startup hydration 시 `dueAt <= now`는 즉시 queue 재적재, 미래 시점은 남은 delay로 타이머 재설정
+  - 중복 스냅샷/중복 enqueue를 방지하도록 scanId 기준으로 멱등 복구
 - 워커 종료 정책:
   - 일반 stop: `stopScanWorker()`는 pending retry timer를 취소해 stop 이후 예기치 않은 재enqueue를 방지
   - 프로세스 shutdown: `stopScanWorkerAndDrain()`는 pending retry를 queue로 materialize하고 in-flight 처리 종료까지 대기
@@ -139,12 +143,14 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - scans (`retryCount`, `lastError`, `lastErrorCode`, `findings` 포함)
   - scan queue jobs (FIFO 순서 보존)
   - scan dead-letter items
+  - scan retry schedules (`scanId`, `dueAt`)
   - organizations
   - memberships
   - tenant audit logs
 - 서버 시작 시 경량 migration 버저닝(`schema_migrations`)을 기준으로 schema를 순차/멱등 적용
-- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/org/membership/audit log)를 hydrate
+- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/retry schedule/org/membership/audit log)를 hydrate
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
+- 비정상 종료 시 retry timer 대기 작업은 startup recovery에서 즉시 재적재 또는 남은 backoff로 재타이머링
 
 주요 스캔/테넌트 환경변수:
 
@@ -282,7 +288,7 @@ pnpm --filter @devsecops/web build
 
 ## 현재 제약 사항
 
-- **재기동 한계(잔여)**: startup recovery로 `running` 스캔은 자동 복구되지만, 비정상 크래시 시 retry timer 대기 중 작업의 정확한 backoff 시점 복원은 보장하지 않음
+- **크래시 타이밍 경계**: retry schedule 복구는 지원되지만, persistence는 snapshot 재기록 방식이라 프로세스 강제 종료 타이밍에 마지막 수 ms 상태가 유실될 수 있음(운영상 정기 graceful shutdown 권장)
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)

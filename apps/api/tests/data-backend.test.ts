@@ -86,6 +86,7 @@ describe("data backend config", () => {
     expect(result.persistedState.queue).toEqual({
       queuedScanIds: [],
       deadLetters: [],
+      pendingRetries: [],
     });
     expect(getActiveDataBackend()).toBe("memory");
   });
@@ -151,6 +152,7 @@ describe("data backend config", () => {
       "001_scans",
       "002_tenants",
       "003_scan_queue",
+      "004_scan_retry_schedule",
     ]);
 
     const scansTableCreateStatements = mock.query.mock.calls.filter(([sql]) =>
@@ -212,6 +214,7 @@ describe("data backend config", () => {
     expect(result.persistedState.scans[0]?.status).toBe("queued");
     expect(result.persistedState.scans[0]?.tenantId).toBe("tenant-a");
     expect(result.persistedState.queue.queuedScanIds).toEqual(["scan-running-1"]);
+    expect(result.persistedState.queue.pendingRetries).toEqual([]);
 
     const hasRecoveryUpdateQuery = mock.query.mock.calls.some(([sql]) => {
       const statement = String(sql);
@@ -221,7 +224,7 @@ describe("data backend config", () => {
     expect(hasRecoveryUpdateQuery).toBe(true);
   });
 
-  it("postgres 초기화 시 queue/dead-letter 상태를 hydrate 해야 한다", async () => {
+  it("postgres 초기화 시 queue/dead-letter/retry 상태를 hydrate 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
     process.env.DATABASE_URL = "postgresql://example/devsecops";
 
@@ -246,6 +249,15 @@ describe("data backend config", () => {
         ];
       }
 
+      if (sql.includes("FROM scan_retry_schedules")) {
+        return [
+          {
+            scan_id: "scan-retry-1",
+            due_at: "2026-03-01T00:00:30.000Z",
+          },
+        ];
+      }
+
       return [];
     });
 
@@ -266,10 +278,16 @@ describe("data backend config", () => {
           failedAt: "2026-03-01T00:00:00.000Z",
         },
       ],
+      pendingRetries: [
+        {
+          scanId: "scan-retry-1",
+          dueAt: "2026-03-01T00:00:30.000Z",
+        },
+      ],
     });
   });
 
-  it("persistQueueState는 postgres 모드에서 queue/dead-letter 스냅샷을 저장해야 한다", async () => {
+  it("persistQueueState는 postgres 모드에서 queue/dead-letter/retry 스냅샷을 저장해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
     process.env.DATABASE_URL = "postgresql://example/devsecops";
 
@@ -291,6 +309,12 @@ describe("data backend config", () => {
           failedAt: "2026-03-01T00:10:00.000Z",
         },
       ],
+      pendingRetries: [
+        {
+          scanId: "scan-retry-a",
+          dueAt: "2026-03-01T00:20:00.000Z",
+        },
+      ],
     });
 
     await resetDataBackendForTests();
@@ -298,6 +322,9 @@ describe("data backend config", () => {
     const statements = mock.query.mock.calls.map(([sql]) => String(sql));
     expect(statements.some((sql) => sql.includes("DELETE FROM scan_queue_jobs"))).toBe(true);
     expect(statements.some((sql) => sql.includes("DELETE FROM scan_dead_letters"))).toBe(true);
+    expect(statements.some((sql) => sql.includes("DELETE FROM scan_retry_schedules"))).toBe(
+      true
+    );
 
     const queueInsertValues = mock.query.mock.calls
       .filter(([sql]) => String(sql).includes("INSERT INTO scan_queue_jobs"))
@@ -316,5 +343,10 @@ describe("data backend config", () => {
         "2026-03-01T00:10:00.000Z",
       ],
     ]);
+
+    const retryInsertValues = mock.query.mock.calls
+      .filter(([sql]) => String(sql).includes("INSERT INTO scan_retry_schedules"))
+      .map(([, values]) => values);
+    expect(retryInsertValues).toEqual([["scan-retry-a", "2026-03-01T00:20:00.000Z"]]);
   });
 });

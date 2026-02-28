@@ -2,6 +2,7 @@ import {
   persistQueueState,
   type PersistedDeadLetterItem,
   type PersistedQueueState,
+  type PersistedRetryScheduleItem,
 } from "../storage/backend.js";
 import { getScanExecutionMode } from "./adapters/common.js";
 import { getAdapter } from "./registry.js";
@@ -52,7 +53,14 @@ export interface ProcessNextScanJobResult {
 let workerTimer: NodeJS.Timeout | null = null;
 let isProcessing = false;
 let processingScanId: string | null = null;
-const retryTimers = new Map<NodeJS.Timeout, string>();
+
+interface RetrySchedule {
+  scanId: string;
+  dueAt: string;
+  timer: NodeJS.Timeout;
+}
+
+const retrySchedules = new Map<string, RetrySchedule>();
 
 // 테스트에서 특정 scanId를 의도적으로 n회 실패시키기 위한 주입 훅
 const forcedFailureByScanId = new Map<string, number>();
@@ -73,10 +81,41 @@ function cloneDeadLetterItem(item: PersistedDeadLetterItem): DeadLetterItem {
   };
 }
 
+function cloneRetryScheduleItem(
+  item: PersistedRetryScheduleItem
+): PersistedRetryScheduleItem {
+  return {
+    ...item,
+  };
+}
+
+function toNormalizedDueAt(value: string): string | null {
+  const dueAtMs = Date.parse(value);
+  if (Number.isNaN(dueAtMs)) {
+    return null;
+  }
+
+  return new Date(dueAtMs).toISOString();
+}
+
 function createQueueStateSnapshot(): PersistedQueueState {
+  const pendingRetries = Array.from(retrySchedules.values(), (schedule) =>
+    cloneRetryScheduleItem({
+      scanId: schedule.scanId,
+      dueAt: schedule.dueAt,
+    })
+  ).sort((left, right) => {
+    if (left.dueAt === right.dueAt) {
+      return left.scanId.localeCompare(right.scanId);
+    }
+
+    return left.dueAt.localeCompare(right.dueAt);
+  });
+
   return {
     queuedScanIds: [...scanJobQueue],
     deadLetters: deadLetterQueue.map(cloneDeadLetterItem),
+    pendingRetries,
   };
 }
 
@@ -85,6 +124,7 @@ function persistCurrentQueueState(): void {
 }
 
 export function hydrateQueueState(state: PersistedQueueState): void {
+  clearPendingRetryTimers();
   scanJobQueue.length = 0;
   deadLetterQueue.length = 0;
 
@@ -96,12 +136,49 @@ export function hydrateQueueState(state: PersistedQueueState): void {
     deadLetterQueue.push(cloneDeadLetterItem(item));
   }
 
-  clearPendingRetryTimers();
+  const queuedScanIdSet = new Set(scanJobQueue);
+  const hydratedRetryScanIdSet = new Set<string>();
+  const now = Date.now();
+
+  for (const retry of state.pendingRetries ?? []) {
+    const scanId = retry.scanId?.trim();
+    if (!scanId || hydratedRetryScanIdSet.has(scanId)) {
+      continue;
+    }
+
+    hydratedRetryScanIdSet.add(scanId);
+
+    if (queuedScanIdSet.has(scanId)) {
+      continue;
+    }
+
+    const normalizedDueAt = toNormalizedDueAt(retry.dueAt);
+    if (!normalizedDueAt) {
+      enqueueScanInternal(scanId, { persist: false });
+      queuedScanIdSet.add(scanId);
+      continue;
+    }
+
+    const dueAtMs = Date.parse(normalizedDueAt);
+    if (dueAtMs <= now) {
+      enqueueScanInternal(scanId, { persist: false });
+      queuedScanIdSet.add(scanId);
+      continue;
+    }
+
+    scheduleRetry(scanId, dueAtMs - now, {
+      dueAt: normalizedDueAt,
+      persist: false,
+    });
+  }
+
   forcedFailureByScanId.clear();
   forcedCleanupFailureByScanId.clear();
   isProcessing = false;
   processingScanId = null;
+  persistCurrentQueueState();
 }
+
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -336,25 +413,84 @@ function consumeForcedFailure(scanId: string): boolean {
   return true;
 }
 
-function scheduleRetry(scanId: string, backoffMs: number): void {
-  const retryTimer = setTimeout(() => {
-    retryTimers.delete(retryTimer);
-    enqueueScan(scanId);
-  }, backoffMs);
+interface ScheduleRetryOptions {
+  dueAt?: string;
+  persist?: boolean;
+}
 
-  retryTimers.set(retryTimer, scanId);
+function materializeRetrySchedule(scanId: string, retryTimer?: NodeJS.Timeout): void {
+  const scheduled = retrySchedules.get(scanId);
+  if (!scheduled) {
+    return;
+  }
+
+  if (retryTimer && scheduled.timer !== retryTimer) {
+    return;
+  }
+
+  clearTimeout(scheduled.timer);
+  retrySchedules.delete(scanId);
+
+  if (!scanJobQueue.includes(scanId)) {
+    enqueueScanInternal(scanId, { persist: false });
+  }
+
+  persistCurrentQueueState();
+}
+
+function scheduleRetry(
+  scanId: string,
+  backoffMs: number,
+  options: ScheduleRetryOptions = {}
+): void {
+  const normalizedBackoffMs = Math.max(0, Math.trunc(backoffMs));
+  const normalizedDueAt = options.dueAt ? toNormalizedDueAt(options.dueAt) : null;
+  const dueAtMs = normalizedDueAt
+    ? Date.parse(normalizedDueAt)
+    : Date.now() + normalizedBackoffMs;
+  const delayMs = Math.max(0, dueAtMs - Date.now());
+
+  const existingSchedule = retrySchedules.get(scanId);
+  if (existingSchedule) {
+    clearTimeout(existingSchedule.timer);
+    retrySchedules.delete(scanId);
+  }
+
+  const retryTimer = setTimeout(() => {
+    materializeRetrySchedule(scanId, retryTimer);
+  }, delayMs);
+
+  retryTimer.unref?.();
+
+  retrySchedules.set(scanId, {
+    scanId,
+    dueAt: new Date(dueAtMs).toISOString(),
+    timer: retryTimer,
+  });
+
+  if (options.persist ?? true) {
+    persistCurrentQueueState();
+  }
 }
 
 function clearPendingRetryTimers(options: { materializeIntoQueue?: boolean } = {}): void {
   const bufferedScanIds: string[] = [];
+  const bufferedScanIdSet = new Set<string>();
 
-  for (const [retryTimer, scanId] of retryTimers.entries()) {
-    clearTimeout(retryTimer);
-    if (options.materializeIntoQueue) {
-      bufferedScanIds.push(scanId);
+  for (const schedule of retrySchedules.values()) {
+    clearTimeout(schedule.timer);
+
+    if (
+      options.materializeIntoQueue &&
+      !scanJobQueue.includes(schedule.scanId) &&
+      !bufferedScanIdSet.has(schedule.scanId)
+    ) {
+      bufferedScanIds.push(schedule.scanId);
+      bufferedScanIdSet.add(schedule.scanId);
     }
   }
-  retryTimers.clear();
+
+  retrySchedules.clear();
 
   if (options.materializeIntoQueue) {
     for (const scanId of bufferedScanIds) {
@@ -403,12 +539,12 @@ function normalizeScanRuntimeError(error: unknown): ScanRuntimeErrorInfo {
  */
 export function getPendingRetryTimerCount(filter?: QueueTenantFilter): number {
   if (!filter?.tenantId) {
-    return retryTimers.size;
+    return retrySchedules.size;
   }
 
   let count = 0;
-  for (const scanId of retryTimers.values()) {
-    if (matchesTenantFilter(scanId, filter)) {
+  for (const schedule of retrySchedules.values()) {
+    if (matchesTenantFilter(schedule.scanId, filter)) {
       count += 1;
     }
   }
@@ -486,6 +622,13 @@ export async function processNextScanJob(
   const scanId = dequeueNextScanId(filter);
   if (!scanId) {
     return { processed: false, busy: false };
+  }
+
+  const existingRetrySchedule = retrySchedules.get(scanId);
+  if (existingRetrySchedule) {
+    clearTimeout(existingRetrySchedule.timer);
+    retrySchedules.delete(scanId);
+    persistCurrentQueueState();
   }
 
   isProcessing = true;

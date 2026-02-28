@@ -52,7 +52,7 @@ describe("Scan Queue", () => {
     expect(processResult).toEqual({ processed: false, busy: false });
   });
 
-  it("hydrateQueueState는 persisted queue/dead-letter 스냅샷을 인메모리로 복원해야 한다", () => {
+  it("hydrateQueueState는 persisted queue/dead-letter/retry 스냅샷을 인메모리로 복원해야 한다", () => {
     const snapshot = {
       queuedScanIds: ["scan-queued-1", "scan-queued-2"],
       deadLetters: [
@@ -64,12 +64,19 @@ describe("Scan Queue", () => {
           failedAt: "2026-03-01T00:00:00.000Z",
         },
       ],
+      pendingRetries: [
+        {
+          scanId: "scan-retry-1",
+          dueAt: "2099-01-01T00:00:00.000Z",
+        },
+      ],
     };
 
     hydrateQueueState(snapshot);
 
     expect(getQueueSize()).toBe(2);
     expect(getDeadLetterSize()).toBe(1);
+    expect(getPendingRetryTimerCount()).toBe(1);
     expect(listDeadLetters()).toEqual([
       {
         scanId: "scan-dead-1",
@@ -83,9 +90,61 @@ describe("Scan Queue", () => {
     // hydrate 입력 객체를 외부에서 바꿔도 내부 상태는 영향받지 않아야 한다.
     snapshot.queuedScanIds.push("scan-queued-3");
     snapshot.deadLetters[0]!.error = "변조";
+    snapshot.pendingRetries[0]!.dueAt = "1990-01-01T00:00:00.000Z";
 
     expect(getQueueSize()).toBe(2);
+    expect(getPendingRetryTimerCount()).toBe(1);
     expect(listDeadLetters()[0]?.error).toBe("스캔 실행에 실패했습니다");
+  });
+
+  it("hydrateQueueState는 due retry를 즉시 queue로 materialize하고 중복 enqueue를 피해야 한다", () => {
+    vi.useFakeTimers();
+
+    const dueAt = new Date(Date.now() - 1_000).toISOString();
+    hydrateQueueState({
+      queuedScanIds: ["scan-due-1"],
+      deadLetters: [],
+      pendingRetries: [
+        {
+          scanId: "scan-due-1",
+          dueAt,
+        },
+        {
+          scanId: "scan-due-2",
+          dueAt,
+        },
+      ],
+    });
+
+    expect(getQueueSize()).toBe(2);
+    expect(getPendingRetryTimerCount()).toBe(0);
+  });
+
+  it("hydrateQueueState는 future retry를 남은 지연으로 재설정해야 한다", async () => {
+    vi.useFakeTimers();
+
+    const dueAt = new Date(Date.now() + 500).toISOString();
+    hydrateQueueState({
+      queuedScanIds: [],
+      deadLetters: [],
+      pendingRetries: [
+        {
+          scanId: "scan-future-1",
+          dueAt,
+        },
+      ],
+    });
+
+    expect(getQueueSize()).toBe(0);
+    expect(getPendingRetryTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(getQueueSize()).toBe(0);
+    expect(getPendingRetryTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getQueueSize()).toBe(1);
+    expect(getPendingRetryTimerCount()).toBe(0);
   });
 
   it("enqueue 후 processNextScanJob 호출 시 queued -> running -> completed로 전이되어야 한다", async () => {

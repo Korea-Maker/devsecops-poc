@@ -22,9 +22,15 @@ export interface PersistedDeadLetterItem {
   failedAt: string;
 }
 
+export interface PersistedRetryScheduleItem {
+  scanId: string;
+  dueAt: string;
+}
+
 export interface PersistedQueueState {
   queuedScanIds: string[];
   deadLetters: PersistedDeadLetterItem[];
+  pendingRetries: PersistedRetryScheduleItem[];
 }
 
 export interface PersistedState {
@@ -117,6 +123,11 @@ interface ScanDeadLetterRow extends QueryResultRow {
   failed_at: string;
 }
 
+interface ScanRetryScheduleRow extends QueryResultRow {
+  scan_id: string;
+  due_at: string;
+}
+
 let activeBackend: DataBackend = "memory";
 let sqlClient: SqlClient | null = null;
 let initPromise: Promise<DataBackendInitResult> | null = null;
@@ -132,6 +143,7 @@ function createEmptyPersistedState(): PersistedState {
     queue: {
       queuedScanIds: [],
       deadLetters: [],
+      pendingRetries: [],
     },
   };
 }
@@ -339,6 +351,15 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       )
     `,
     "CREATE INDEX IF NOT EXISTS idx_scan_dead_letters_scan_id ON scan_dead_letters (scan_id)",
+  ]),
+  createSqlMigration("004_scan_retry_schedule", [
+    `
+      CREATE TABLE IF NOT EXISTS scan_retry_schedules (
+        scan_id TEXT PRIMARY KEY,
+        due_at TEXT NOT NULL
+      )
+    `,
+    "CREATE INDEX IF NOT EXISTS idx_scan_retry_schedules_due_at ON scan_retry_schedules (due_at)",
   ]),
 ];
 
@@ -549,6 +570,15 @@ function mapQueueDeadLetterRowToEntity(
   };
 }
 
+function mapRetryScheduleRowToEntity(
+  row: ScanRetryScheduleRow
+): PersistedRetryScheduleItem {
+  return {
+    scanId: row.scan_id,
+    dueAt: row.due_at,
+  };
+}
+
 async function readPersistedState(client: SqlClient): Promise<PersistedState> {
   const [
     scansResult,
@@ -557,6 +587,7 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
     auditLogsResult,
     queueJobsResult,
     deadLettersResult,
+    retrySchedulesResult,
   ] = await Promise.all([
     client.query<ScanRow>(
       `
@@ -619,6 +650,13 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
           ORDER BY id ASC
         `
     ),
+    client.query<ScanRetryScheduleRow>(
+      `
+          SELECT scan_id, due_at
+          FROM scan_retry_schedules
+          ORDER BY due_at ASC, scan_id ASC
+        `
+    ),
   ]);
 
   return {
@@ -629,6 +667,7 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
     queue: {
       queuedScanIds: queueJobsResult.rows.map((row) => row.scan_id),
       deadLetters: deadLettersResult.rows.map(mapQueueDeadLetterRowToEntity),
+      pendingRetries: retrySchedulesResult.rows.map(mapRetryScheduleRowToEntity),
     },
   };
 }
@@ -680,13 +719,14 @@ export async function initializeDataBackend(
       candidateClient = null;
       activeBackend = "postgres";
       info(
-        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, recoveredRunning=%d)",
+        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, retrySchedules=%d, recoveredRunning=%d)",
         persistedState.scans.length,
         persistedState.organizations.length,
         persistedState.memberships.length,
         persistedState.tenantAuditLogs.length,
         persistedState.queue.queuedScanIds.length,
         persistedState.queue.deadLetters.length,
+        persistedState.queue.pendingRetries.length,
         recoveredRunningScans
       );
 
@@ -825,10 +865,12 @@ export function clearPersistedScans(): void {
 export function persistQueueState(state: PersistedQueueState): void {
   const snapshotQueuedScanIds = [...state.queuedScanIds];
   const snapshotDeadLetters = state.deadLetters.map((item) => ({ ...item }));
+  const snapshotPendingRetries = state.pendingRetries.map((item) => ({ ...item }));
 
   schedulePersistenceTask("persistQueueState", async (client) => {
     await client.query("DELETE FROM scan_queue_jobs");
     await client.query("DELETE FROM scan_dead_letters");
+    await client.query("DELETE FROM scan_retry_schedules");
 
     for (const scanId of snapshotQueuedScanIds) {
       await client.query(
@@ -849,6 +891,16 @@ export function persistQueueState(state: PersistedQueueState): void {
         [item.scanId, item.retryCount, item.error, item.code ?? null, item.failedAt]
       );
     }
+
+    for (const item of snapshotPendingRetries) {
+      await client.query(
+        `
+          INSERT INTO scan_retry_schedules (scan_id, due_at)
+          VALUES ($1, $2)
+        `,
+        [item.scanId, item.dueAt]
+      );
+    }
   });
 }
 
@@ -856,6 +908,7 @@ export function clearPersistedQueueState(): void {
   schedulePersistenceTask("clearPersistedQueueState", async (client) => {
     await client.query("DELETE FROM scan_queue_jobs");
     await client.query("DELETE FROM scan_dead_letters");
+    await client.query("DELETE FROM scan_retry_schedules");
   });
 }
 
