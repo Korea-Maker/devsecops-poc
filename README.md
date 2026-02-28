@@ -47,7 +47,7 @@
 
 ---
 
-## 현재 구현 상태 (Phase 2-9 기준)
+## 현재 구현 상태 (Phase 2-4 기준)
 
 ### API (`apps/api`)
 
@@ -97,6 +97,28 @@ curl -s http://localhost:3001/api/v1/scans/queue/status
 # 대기 중인 다음 작업 1건 즉시 처리
 curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 ```
+
+### GitHub CI/CD 연동 (`apps/api` + GitHub Actions)
+
+- `POST /api/v1/github/webhook` → GitHub webhook 수신 + 스캔 트리거 (`202 Accepted`)
+  - 지원 이벤트: `push`, `pull_request (opened | synchronize)`
+  - HMAC-SHA256 시그니처 검증 (timingSafeEqual 사용)
+  - 각 이벤트마다 semgrep/trivy/gitleaks 3개 엔진 스캔 자동 생성
+- `GET /api/v1/github/status` → GitHub 연동 상태 조회
+  - 응답: `{ webhookConfigured, appIdConfigured, mockMode }`
+
+**GitHub Actions 워크플로우:**
+- `.github/workflows/ci.yml`: 모든 push/PR 시 린트/타입체크/테스트/빌드 실행
+- `.github/workflows/security-scan.yml`: PR 시 semgrep/trivy/gitleaks 병렬 스캔
+- `.github/actions/devsecops-scan/action.yml`: Composite Action
+  - 스캔 생성 (POST /api/v1/scans)
+  - 폴링으로 완료 대기 (최대 5분, 10초 간격)
+  - 결과를 GitHub Step Summary에 출력
+
+**Webhook 환경변수:**
+- `GITHUB_WEBHOOK_SECRET`: webhook 시그니처 검증 시크릿 (선택)
+- `GITHUB_APP_ID`: GitHub App ID (미구현, 향후 예정)
+- `DEVSECOPS_API_URL`: GitHub Actions에서 사용할 API 베이스 URL (예: `https://api.example.com`)
 
 ### Web (`apps/web`)
 
@@ -166,6 +188,7 @@ pnpm --filter @devsecops/web build
 - **인메모리 스토어**: API 서버 재시작 시 모든 스캔 데이터 소실 (PostgreSQL 연동 예정)
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 미구현**: Google SSO 미구현 — 대시보드에 누구나 접근 가능
+- **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체
 
@@ -175,4 +198,5 @@ pnpm --filter @devsecops/web build
 
 - `docs/workflow/DECISIONS.md`: 확정 의사결정 / 미결정 / 리스크
 - `docs/workflow/PHASE3_BACKLOG.md`: Phase 3 대시보드/리포팅 구현 기록
+- `docs/workflow/PHASE4_BACKLOG.md`: Phase 4 GitHub CI/CD 연동 구현 기록
 - `CLAUDE.md`: 프로젝트 작업 규칙 및 검증 루틴

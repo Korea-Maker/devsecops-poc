@@ -1,0 +1,44 @@
+# 보안 스캔 워크플로우 - PR 시 semgrep/trivy/gitleaks 를 병렬로 실행
+name: Security Scan
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  security-scan:
+    name: "보안 스캔 (${{ matrix.engine }})"
+    runs-on: ubuntu-latest
+
+    strategy:
+      # 한 엔진이 실패해도 나머지 엔진은 계속 실행
+      fail-fast: false
+      matrix:
+        engine:
+          - semgrep
+          - trivy
+          - gitleaks
+
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      # DevSecOps PoC Composite Action 사용
+      # API URL은 레포지토리 시크릿 DEVSECOPS_API_URL 에서 주입
+      - name: DevSecOps 보안 스캔 실행 (${{ matrix.engine }})
+        id: scan
+        uses: ./.github/actions/devsecops-scan
+        with:
+          api-url: ${{ secrets.DEVSECOPS_API_URL }}
+          engine: ${{ matrix.engine }}
+          # repo-url, branch 는 Composite Action 기본값(clone_url, head_ref) 사용
+
+      # 스캔 결과를 PR 커멘트용 아티팩트로 저장 (선택)
+      - name: 스캔 결과 요약 출력
+        if: always()
+        shell: bash
+        run: |
+          echo "엔진: ${{ matrix.engine }}"
+          echo "스캔 ID: ${{ steps.scan.outputs.scan-id }}"
+          echo "최종 상태: ${{ steps.scan.outputs.status }}"

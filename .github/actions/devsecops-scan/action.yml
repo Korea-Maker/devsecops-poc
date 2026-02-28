@@ -1,0 +1,143 @@
+# DevSecOps PoC 보안 스캔 트리거 Composite Action
+# - POST /api/v1/scans 로 스캔을 생성하고 완료될 때까지 폴링한다
+# - 완료 후 findings 요약을 GITHUB_STEP_SUMMARY에 출력한다
+name: DevSecOps Security Scan
+description: "DevSecOps PoC API에 보안 스캔을 트리거하고 결과를 대기합니다."
+
+inputs:
+  api-url:
+    description: "DevSecOps API의 베이스 URL (예: https://api.example.com)"
+    required: true
+  engine:
+    description: "사용할 스캔 엔진 (semgrep | trivy | gitleaks)"
+    required: false
+    default: "semgrep"
+  repo-url:
+    description: "스캔 대상 저장소 URL"
+    required: false
+    default: ${{ github.event.repository.clone_url }}
+  branch:
+    description: "스캔 대상 브랜치"
+    required: false
+    default: ${{ github.head_ref || github.ref_name }}
+
+outputs:
+  scan-id:
+    description: "생성된 스캔 ID"
+    value: ${{ steps.poll.outputs.scan-id }}
+  status:
+    description: "최종 스캔 상태 (completed | failed | timeout)"
+    value: ${{ steps.poll.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    # ── Step 1: 스캔 생성 요청 ────────────────────────────────
+    - name: 스캔 생성 (POST /api/v1/scans)
+      id: create
+      shell: bash
+      run: |
+        echo "::group::스캔 생성 요청"
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST "${{ inputs.api-url }}/api/v1/scans" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "engine": "${{ inputs.engine }}",
+            "repoUrl": "${{ inputs.repo-url }}",
+            "branch": "${{ inputs.branch }}"
+          }')
+
+        HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+
+        echo "HTTP 상태: $HTTP_STATUS"
+        echo "응답 본문: $BODY"
+        echo "::endgroup::"
+
+        if [ "$HTTP_STATUS" != "202" ] && [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "200" ]; then
+          echo "::error::스캔 생성 실패 (HTTP $HTTP_STATUS)"
+          exit 1
+        fi
+
+        # jq로 scanId 추출
+        SCAN_ID=$(echo "$BODY" | jq -r '.scanId // .data.id // .id // empty')
+        if [ -z "$SCAN_ID" ]; then
+          echo "::error::응답에서 scanId를 추출할 수 없습니다."
+          exit 1
+        fi
+
+        echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
+        echo "스캔 ID: $SCAN_ID"
+
+    # ── Step 2: 폴링으로 스캔 완료 대기 ──────────────────────
+    - name: 스캔 완료 대기 (최대 5분, 10초 간격)
+      id: poll
+      shell: bash
+      run: |
+        SCAN_ID="${{ steps.create.outputs.scan_id }}"
+        MAX_ATTEMPTS=30   # 10초 × 30 = 300초 = 5분
+        ATTEMPT=0
+        FINAL_STATUS="timeout"
+
+        echo "스캔 ID '$SCAN_ID' 완료 대기 중..."
+
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          ATTEMPT=$((ATTEMPT + 1))
+          sleep 10
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "${{ inputs.api-url }}/api/v1/scans/$SCAN_ID")
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::warning::상태 조회 실패 (HTTP $HTTP_STATUS), 재시도 $ATTEMPT/$MAX_ATTEMPTS"
+            continue
+          fi
+
+          STATUS=$(echo "$BODY" | jq -r '.status // empty')
+          echo "[$ATTEMPT/$MAX_ATTEMPTS] 현재 상태: $STATUS"
+
+          if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+            FINAL_STATUS="$STATUS"
+            SCAN_BODY="$BODY"
+            break
+          fi
+        done
+
+        echo "scan-id=$SCAN_ID"   >> "$GITHUB_OUTPUT"
+        echo "status=$FINAL_STATUS" >> "$GITHUB_OUTPUT"
+
+        if [ "$FINAL_STATUS" = "timeout" ]; then
+          echo "::error::스캔이 5분 내에 완료되지 않았습니다."
+          exit 1
+        fi
+
+        # ── Step 3: findings 요약 출력 ────────────────────────
+        TOTAL=$(echo "$SCAN_BODY"    | jq '.findings.totalFindings // 0')
+        CRITICAL=$(echo "$SCAN_BODY" | jq '.findings.critical // 0')
+        HIGH=$(echo "$SCAN_BODY"     | jq '.findings.high // 0')
+        MEDIUM=$(echo "$SCAN_BODY"   | jq '.findings.medium // 0')
+
+        {
+          echo "## 🔒 보안 스캔 결과: ${{ inputs.engine }}"
+          echo ""
+          echo "| 항목 | 값 |"
+          echo "|------|-----|"
+          echo "| 스캔 ID | \`$SCAN_ID\` |"
+          echo "| 엔진 | ${{ inputs.engine }} |"
+          echo "| 브랜치 | ${{ inputs.branch }} |"
+          echo "| 최종 상태 | $FINAL_STATUS |"
+          echo "| 전체 findings | $TOTAL |"
+          echo "| CRITICAL | $CRITICAL |"
+          echo "| HIGH | $HIGH |"
+          echo "| MEDIUM | $MEDIUM |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "스캔 완료: 상태=$FINAL_STATUS, 총 findings=$TOTAL (CRITICAL=$CRITICAL, HIGH=$HIGH)"
+
+        # CRITICAL findings 존재 시 워크플로우 실패 처리
+        if [ "$FINAL_STATUS" = "failed" ]; then
+          echo "::error::스캔이 실패 상태로 종료되었습니다."
+          exit 1
+        fi
