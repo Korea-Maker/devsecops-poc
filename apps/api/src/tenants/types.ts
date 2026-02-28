@@ -9,7 +9,9 @@ export interface Organization {
   id: string;
   name: string;
   slug: string;
+  active: boolean;
   createdAt: string;
+  disabledAt?: string;
 }
 
 /** 조직 멤버십 모델 */
@@ -19,6 +21,19 @@ export interface OrganizationMembership {
   role: UserRole;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 조직 초대 토큰 모델 */
+export interface OrganizationInviteToken {
+  token: string;
+  organizationId: string;
+  role: UserRole;
+  email?: string;
+  createdByUserId?: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt?: string;
+  consumedByUserId?: string;
 }
 
 /** 요청별 테넌트 컨텍스트 */

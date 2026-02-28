@@ -2,7 +2,7 @@ import { Pool, type QueryResult, type QueryResultRow } from "pg";
 import type { ScanErrorCode, ScanStatus } from "../scanner/types.js";
 import type { ScanFindingsSummary, ScanRecord } from "../scanner/store.js";
 import { DEFAULT_TENANT_ID } from "../tenants/types.js";
-import type { Organization, OrganizationMembership } from "../tenants/types.js";
+import type { Organization, OrganizationInviteToken, OrganizationMembership } from "../tenants/types.js";
 import type { TenantAuditLog } from "../tenants/audit-log.js";
 
 const DEFAULT_ORGANIZATION_NAME = "Default Organization";
@@ -37,6 +37,7 @@ export interface PersistedState {
   scans: ScanRecord[];
   organizations: Organization[];
   memberships: OrganizationMembership[];
+  inviteTokens: OrganizationInviteToken[];
   tenantAuditLogs: TenantAuditLog[];
   queue: PersistedQueueState;
 }
@@ -88,7 +89,9 @@ interface OrganizationRow extends QueryResultRow {
   id: string;
   name: string;
   slug: string;
+  active: boolean;
   created_at: string;
+  disabled_at: string | null;
 }
 
 interface MembershipRow extends QueryResultRow {
@@ -97,6 +100,18 @@ interface MembershipRow extends QueryResultRow {
   role: OrganizationMembership["role"];
   created_at: string;
   updated_at: string;
+}
+
+interface OrganizationInviteTokenRow extends QueryResultRow {
+  token: string;
+  organization_id: string;
+  role: OrganizationInviteToken["role"];
+  email: string | null;
+  created_by_user_id: string | null;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  consumed_by_user_id: string | null;
 }
 
 interface TenantAuditLogRow extends QueryResultRow {
@@ -139,6 +154,7 @@ function createEmptyPersistedState(): PersistedState {
     scans: [],
     organizations: [],
     memberships: [],
+    inviteTokens: [],
     tenantAuditLogs: [],
     queue: {
       queuedScanIds: [],
@@ -361,6 +377,41 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
     `,
     "CREATE INDEX IF NOT EXISTS idx_scan_retry_schedules_due_at ON scan_retry_schedules (due_at)",
   ]),
+  {
+    version: "005_tenant_org_hardening",
+    apply: async (client) => {
+      await client.query(
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS active BOOLEAN"
+      );
+      await client.query(
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS disabled_at TEXT"
+      );
+      await client.query("UPDATE organizations SET active = TRUE WHERE active IS NULL");
+      await client.query("ALTER TABLE organizations ALTER COLUMN active SET DEFAULT TRUE");
+      await client.query("ALTER TABLE organizations ALTER COLUMN active SET NOT NULL");
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS organization_invite_tokens (
+          token TEXT PRIMARY KEY,
+          organization_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          email TEXT,
+          created_by_user_id TEXT,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          consumed_at TEXT,
+          consumed_by_user_id TEXT
+        )
+      `);
+
+      await client.query(
+        "CREATE INDEX IF NOT EXISTS idx_org_invite_tokens_org_id ON organization_invite_tokens (organization_id)"
+      );
+      await client.query(
+        "CREATE INDEX IF NOT EXISTS idx_org_invite_tokens_expires_at ON organization_invite_tokens (expires_at)"
+      );
+    },
+  },
 ];
 
 async function ensureSchemaMigrationsTable(client: SqlClient): Promise<void> {
@@ -532,7 +583,9 @@ function mapOrganizationRowToEntity(row: OrganizationRow): Organization {
     id: row.id,
     name: row.name,
     slug: row.slug,
+    active: typeof row.active === "boolean" ? row.active : true,
     createdAt: row.created_at,
+    disabledAt: row.disabled_at ?? undefined,
   };
 }
 
@@ -543,6 +596,22 @@ function mapMembershipRowToEntity(row: MembershipRow): OrganizationMembership {
     role: row.role,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapOrganizationInviteTokenRowToEntity(
+  row: OrganizationInviteTokenRow
+): OrganizationInviteToken {
+  return {
+    token: row.token,
+    organizationId: row.organization_id,
+    role: row.role,
+    email: row.email ?? undefined,
+    createdByUserId: row.created_by_user_id ?? undefined,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    consumedAt: row.consumed_at ?? undefined,
+    consumedByUserId: row.consumed_by_user_id ?? undefined,
   };
 }
 
@@ -584,6 +653,7 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
     scansResult,
     organizationsResult,
     membershipsResult,
+    inviteTokensResult,
     auditLogsResult,
     queueJobsResult,
     deadLettersResult,
@@ -610,7 +680,7 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
     ),
     client.query<OrganizationRow>(
       `
-          SELECT id, name, slug, created_at
+          SELECT id, name, slug, active, created_at, disabled_at
           FROM organizations
           ORDER BY created_at ASC
         `
@@ -619,6 +689,22 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
       `
           SELECT organization_id, user_id, role, created_at, updated_at
           FROM organization_memberships
+          ORDER BY created_at ASC
+        `
+    ),
+    client.query<OrganizationInviteTokenRow>(
+      `
+          SELECT
+            token,
+            organization_id,
+            role,
+            email,
+            created_by_user_id,
+            created_at,
+            expires_at,
+            consumed_at,
+            consumed_by_user_id
+          FROM organization_invite_tokens
           ORDER BY created_at ASC
         `
     ),
@@ -663,6 +749,7 @@ async function readPersistedState(client: SqlClient): Promise<PersistedState> {
     scans: scansResult.rows.map(mapScanRowToRecord),
     organizations: organizationsResult.rows.map(mapOrganizationRowToEntity),
     memberships: membershipsResult.rows.map(mapMembershipRowToEntity),
+    inviteTokens: inviteTokensResult.rows.map(mapOrganizationInviteTokenRowToEntity),
     tenantAuditLogs: auditLogsResult.rows.map(mapAuditLogRowToEntity),
     queue: {
       queuedScanIds: queueJobsResult.rows.map((row) => row.scan_id),
@@ -719,10 +806,11 @@ export async function initializeDataBackend(
       candidateClient = null;
       activeBackend = "postgres";
       info(
-        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, retrySchedules=%d, recoveredRunning=%d)",
+        "[storage] postgres backend 활성화 완료 (scans=%d, orgs=%d, memberships=%d, invites=%d, auditLogs=%d, queueJobs=%d, deadLetters=%d, retrySchedules=%d, recoveredRunning=%d)",
         persistedState.scans.length,
         persistedState.organizations.length,
         persistedState.memberships.length,
+        persistedState.inviteTokens.length,
         persistedState.tenantAuditLogs.length,
         persistedState.queue.queuedScanIds.length,
         persistedState.queue.deadLetters.length,
@@ -916,15 +1004,24 @@ export function persistOrganizationRecord(organization: Organization): void {
   schedulePersistenceTask("persistOrganizationRecord", async (client) => {
     await client.query(
       `
-        INSERT INTO organizations (id, name, slug, created_at)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO organizations (id, name, slug, active, created_at, disabled_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (id)
         DO UPDATE SET
           name = EXCLUDED.name,
           slug = EXCLUDED.slug,
-          created_at = EXCLUDED.created_at
+          active = EXCLUDED.active,
+          created_at = EXCLUDED.created_at,
+          disabled_at = EXCLUDED.disabled_at
       `,
-      [organization.id, organization.name, organization.slug, organization.createdAt]
+      [
+        organization.id,
+        organization.name,
+        organization.slug,
+        organization.active,
+        organization.createdAt,
+        organization.disabledAt ?? null,
+      ]
     );
   });
 }
@@ -958,6 +1055,50 @@ export function persistMembershipRecord(membership: OrganizationMembership): voi
   });
 }
 
+export function persistOrganizationInviteTokenRecord(
+  inviteToken: OrganizationInviteToken
+): void {
+  schedulePersistenceTask("persistOrganizationInviteTokenRecord", async (client) => {
+    await client.query(
+      `
+        INSERT INTO organization_invite_tokens (
+          token,
+          organization_id,
+          role,
+          email,
+          created_by_user_id,
+          created_at,
+          expires_at,
+          consumed_at,
+          consumed_by_user_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (token)
+        DO UPDATE SET
+          organization_id = EXCLUDED.organization_id,
+          role = EXCLUDED.role,
+          email = EXCLUDED.email,
+          created_by_user_id = EXCLUDED.created_by_user_id,
+          created_at = EXCLUDED.created_at,
+          expires_at = EXCLUDED.expires_at,
+          consumed_at = EXCLUDED.consumed_at,
+          consumed_by_user_id = EXCLUDED.consumed_by_user_id
+      `,
+      [
+        inviteToken.token,
+        inviteToken.organizationId,
+        inviteToken.role,
+        inviteToken.email ?? null,
+        inviteToken.createdByUserId ?? null,
+        inviteToken.createdAt,
+        inviteToken.expiresAt,
+        inviteToken.consumedAt ?? null,
+        inviteToken.consumedByUserId ?? null,
+      ]
+    );
+  });
+}
+
 export function deletePersistedMembership(
   organizationId: string,
   userId: string
@@ -977,19 +1118,22 @@ export function clearPersistedOrganizationsAndMemberships(): void {
   schedulePersistenceTask(
     "clearPersistedOrganizationsAndMemberships",
     async (client) => {
+      await client.query("DELETE FROM organization_invite_tokens");
       await client.query("DELETE FROM organization_memberships");
       await client.query("DELETE FROM organizations");
       await client.query(
         `
-          INSERT INTO organizations (id, name, slug, created_at)
-          VALUES ($1, $2, $3, $4)
+          INSERT INTO organizations (id, name, slug, active, created_at, disabled_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT DO NOTHING
         `,
         [
           DEFAULT_TENANT_ID,
           DEFAULT_ORGANIZATION_NAME,
           DEFAULT_ORGANIZATION_SLUG,
+          true,
           new Date().toISOString(),
+          null,
         ]
       );
     }

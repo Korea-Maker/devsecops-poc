@@ -26,6 +26,7 @@ export function buildApp() {
     hydrateOrganizationStore({
       organizations: initResult.persistedState.organizations,
       memberships: initResult.persistedState.memberships,
+      inviteTokens: initResult.persistedState.inviteTokens,
     });
     hydrateTenantAuditLogs(initResult.persistedState.tenantAuditLogs);
   });

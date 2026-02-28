@@ -460,4 +460,333 @@ describe("Tenant API", () => {
     expect(memberAuditRes.statusCode).toBe(403);
     expect(memberAuditRes.json().code).toBe("TENANT_FORBIDDEN");
   });
+
+
+  it("조직 목록은 pagination/search 쿼리를 지원해야 한다", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      payload: { name: "Team Alpha", slug: "team-alpha" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      payload: { name: "Team Beta", slug: "team-beta" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      payload: { name: "Team Gamma", slug: "team-gamma" },
+    });
+
+    const page1 = await app.inject({
+      method: "GET",
+      url: "/api/v1/organizations?search=team&page=1&limit=2",
+    });
+
+    expect(page1.statusCode).toBe(200);
+    expect(page1.json()).toHaveLength(2);
+
+    const page2 = await app.inject({
+      method: "GET",
+      url: "/api/v1/organizations?search=team&page=2&limit=2",
+    });
+
+    expect(page2.statusCode).toBe(200);
+    expect(page2.json()).toHaveLength(1);
+    expect(page2.json()[0]?.slug).toBe("team-gamma");
+
+    const invalidPagination = await app.inject({
+      method: "GET",
+      url: "/api/v1/organizations?page=0&limit=2",
+    });
+
+    expect(invalidPagination.statusCode).toBe(400);
+    expect(invalidPagination.json().code).toBe("TENANT_INVALID_PAGINATION");
+  });
+
+  it("멤버십 목록은 pagination/search 쿼리를 지원해야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "pagination-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Pagination Membership Org",
+        slug: "pagination-membership-org",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    for (const userId of ["member-1", "member-2", "member-3"]) {
+      await app.inject({
+        method: "POST",
+        url: `/api/v1/organizations/${orgId}/memberships`,
+        headers: buildTenantHeaders({
+          tenantId: orgId,
+          userId: "pagination-admin",
+          role: "admin",
+        }),
+        payload: {
+          userId,
+          role: "member",
+        },
+      });
+    }
+
+    const pagedMembers = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/memberships?search=member-&page=2&limit=2`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "pagination-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(pagedMembers.statusCode).toBe(200);
+    expect(pagedMembers.json()).toHaveLength(1);
+    expect(pagedMembers.json()[0]?.userId).toBe("member-3");
+
+    const invalidPagination = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/memberships?page=a&limit=2`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "pagination-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(invalidPagination.statusCode).toBe(400);
+    expect(invalidPagination.json().code).toBe("TENANT_INVALID_PAGINATION");
+  });
+
+  it("조직 비활성화 후에는 멤버십 쓰기 작업이 차단되어야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "disable-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Disable Target Org",
+        slug: "disable-target-org",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    const disableRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/disable`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "disable-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(disableRes.statusCode).toBe(200);
+    expect(disableRes.json().organization.active).toBe(false);
+    expect(disableRes.json().organization.disabledAt).toBeDefined();
+
+    const detailRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "disable-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(detailRes.statusCode).toBe(200);
+    expect(detailRes.json().active).toBe(false);
+
+    const addMemberRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/memberships`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "disable-admin",
+        role: "admin",
+      }),
+      payload: {
+        userId: "disabled-org-member",
+        role: "member",
+      },
+    });
+
+    expect(addMemberRes.statusCode).toBe(409);
+    expect(addMemberRes.json().code).toBe("TENANT_ORG_DISABLED");
+  });
+
+  it("초대 토큰 생성/수락은 성공/실패 계약을 만족해야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "invite-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Invite Route Org",
+        slug: "invite-route-org",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    const memberCreateInviteRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/invite-tokens`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "invite-member",
+        role: "member",
+      }),
+      payload: {
+        role: "member",
+        expiresInMinutes: 30,
+      },
+    });
+
+    expect(memberCreateInviteRes.statusCode).toBe(403);
+    expect(memberCreateInviteRes.json().code).toBe("TENANT_FORBIDDEN");
+
+    const createInviteRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/invite-tokens`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "invite-admin",
+        role: "admin",
+      }),
+      payload: {
+        role: "member",
+        email: "invitee@example.com",
+        expiresInMinutes: 30,
+      },
+    });
+
+    expect(createInviteRes.statusCode).toBe(201);
+    const inviteToken = createInviteRes.json().inviteToken.token as string;
+    expect(typeof inviteToken).toBe("string");
+
+    const acceptRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations/invite-tokens/accept",
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "invited-user",
+        role: "viewer",
+      }),
+      payload: {
+        token: inviteToken,
+        email: "invitee@example.com",
+      },
+    });
+
+    expect(acceptRes.statusCode).toBe(201);
+    expect(acceptRes.json().membership).toMatchObject({
+      organizationId: orgId,
+      userId: "invited-user",
+      role: "member",
+    });
+
+    const replayRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations/invite-tokens/accept",
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "invited-user-2",
+        role: "viewer",
+      }),
+      payload: {
+        token: inviteToken,
+        email: "invitee@example.com",
+      },
+    });
+
+    expect(replayRes.statusCode).toBe(409);
+    expect(replayRes.json().code).toBe("TENANT_INVITE_ALREADY_USED");
+
+    const createSecondInviteRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/invite-tokens`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "invite-admin",
+        role: "admin",
+      }),
+      payload: {
+        role: "viewer",
+        email: "bound@example.com",
+        expiresInMinutes: 30,
+      },
+    });
+
+    const secondInviteToken = createSecondInviteRes.json().inviteToken.token as string;
+
+    const mismatchEmailRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations/invite-tokens/accept",
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "mismatch-user",
+        role: "viewer",
+      }),
+      payload: {
+        token: secondInviteToken,
+        email: "wrong@example.com",
+      },
+    });
+
+    expect(mismatchEmailRes.statusCode).toBe(403);
+    expect(mismatchEmailRes.json().code).toBe("TENANT_INVITE_EMAIL_MISMATCH");
+
+    const crossTenantCreateRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "other-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Other Org",
+        slug: "other-org-invite-scope",
+      },
+    });
+    const otherOrgId = crossTenantCreateRes.json().organization.id as string;
+
+    const crossTenantAcceptRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations/invite-tokens/accept",
+      headers: buildTenantHeaders({
+        tenantId: otherOrgId,
+        userId: "cross-tenant-user",
+        role: "viewer",
+      }),
+      payload: {
+        token: secondInviteToken,
+        email: "bound@example.com",
+      },
+    });
+
+    expect(crossTenantAcceptRes.statusCode).toBe(404);
+    expect(crossTenantAcceptRes.json().code).toBe("TENANT_INVITE_NOT_FOUND");
+  });
+
 });

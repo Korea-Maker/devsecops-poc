@@ -1,7 +1,8 @@
-import { randomUUID } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import {
   DEFAULT_TENANT_ID,
   type Organization,
+  type OrganizationInviteToken,
   type OrganizationMembership,
   type UserRole,
 } from "./types.js";
@@ -9,12 +10,19 @@ import {
   clearPersistedOrganizationsAndMemberships,
   deletePersistedMembership,
   persistMembershipRecord,
+  persistOrganizationInviteTokenRecord,
   persistOrganizationRecord,
 } from "../storage/backend.js";
 
 interface TenantStoreError extends Error {
   code: string;
   statusCode: number;
+}
+
+interface ListQueryOptions {
+  search?: string;
+  page?: number;
+  limit?: number;
 }
 
 const DEFAULT_ORG_NAME = "Default Organization";
@@ -24,6 +32,8 @@ const DEFAULT_ORG_SLUG = "default";
 const orgStore = new Map<string, Organization>();
 /** 인메모리 멤버십 저장소 (key: orgId:userId) */
 const membershipStore = new Map<string, OrganizationMembership>();
+/** 인메모리 조직 초대 토큰 저장소 (key: token) */
+const inviteTokenStore = new Map<string, OrganizationInviteToken>();
 
 const VALID_USER_ROLES: ReadonlySet<string> = new Set([
   "owner",
@@ -56,8 +66,22 @@ function normalizeRequiredText(value: string, field: string): string {
   );
 }
 
+function normalizeOptionalText(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeSlug(slug: string): string {
   return normalizeRequiredText(slug, "slug").toLowerCase();
+}
+
+function normalizeOptionalEmail(value: string | undefined): string | undefined {
+  const normalized = normalizeOptionalText(value);
+  return normalized ? normalized.toLowerCase() : undefined;
 }
 
 function normalizeUserRole(role: UserRole): UserRole {
@@ -70,6 +94,52 @@ function normalizeUserRole(role: UserRole): UserRole {
     "role은 owner, admin, member, viewer 중 하나여야 합니다",
     "TENANT_INVALID_ROLE"
   );
+}
+
+function normalizeFutureIsoTimestamp(value: string): string {
+  const normalized = normalizeRequiredText(value, "expiresAt");
+  const timestamp = Date.parse(normalized);
+
+  if (!Number.isFinite(timestamp)) {
+    throw createTenantStoreError(
+      400,
+      "expiresAt은 유효한 ISO 날짜 문자열이어야 합니다",
+      "TENANT_INVALID_EXPIRES_AT"
+    );
+  }
+
+  if (timestamp <= Date.now()) {
+    throw createTenantStoreError(
+      400,
+      "expiresAt은 현재 시각보다 미래여야 합니다",
+      "TENANT_INVALID_EXPIRES_AT"
+    );
+  }
+
+  return new Date(timestamp).toISOString();
+}
+
+function normalizeSearch(search: string | undefined): string | undefined {
+  const normalized = normalizeOptionalText(search);
+  return normalized ? normalized.toLowerCase() : undefined;
+}
+
+function applyPagination<T>(items: T[], options: ListQueryOptions): T[] {
+  if (options.page === undefined && options.limit === undefined) {
+    return items;
+  }
+
+  const page =
+    typeof options.page === "number" && Number.isInteger(options.page) && options.page > 0
+      ? options.page
+      : 1;
+  const limit =
+    typeof options.limit === "number" && Number.isInteger(options.limit) && options.limit > 0
+      ? options.limit
+      : 20;
+
+  const offset = (page - 1) * limit;
+  return items.slice(offset, offset + limit);
 }
 
 function membershipKey(organizationId: string, userId: string): string {
@@ -93,12 +163,34 @@ function assertOrganizationExists(organizationId: string): Organization {
   return organization;
 }
 
+function assertOrganizationWritable(organizationId: string): Organization {
+  const organization = assertOrganizationExists(organizationId);
+
+  if (!organization.active) {
+    throw createTenantStoreError(
+      409,
+      "비활성화된 조직에는 변경 작업을 수행할 수 없습니다",
+      "TENANT_ORG_DISABLED"
+    );
+  }
+
+  return organization;
+}
+
 function cloneOrganization(organization: Organization): Organization {
   return { ...organization };
 }
 
 function cloneMembership(membership: OrganizationMembership): OrganizationMembership {
   return { ...membership };
+}
+
+function cloneInviteToken(inviteToken: OrganizationInviteToken): OrganizationInviteToken {
+  return { ...inviteToken };
+}
+
+function generateInviteToken(): string {
+  return randomBytes(24).toString("base64url");
 }
 
 function bootstrapDefaultOrganization(options: { persist?: boolean } = {}): void {
@@ -110,6 +202,7 @@ function bootstrapDefaultOrganization(options: { persist?: boolean } = {}): void
     id: DEFAULT_TENANT_ID,
     name: DEFAULT_ORG_NAME,
     slug: DEFAULT_ORG_SLUG,
+    active: true,
     createdAt: new Date().toISOString(),
   };
 
@@ -142,26 +235,62 @@ export function createOrganization(params: {
     id: randomUUID(),
     name,
     slug,
+    active: true,
     createdAt: new Date().toISOString(),
   };
 
   orgStore.set(organization.id, organization);
   persistOrganizationRecord(organization);
-  return organization;
+  return cloneOrganization(organization);
+}
+
+/**
+ * 조직을 비활성화(soft disable)합니다.
+ */
+export function disableOrganization(organizationId: string): Organization {
+  const normalizedOrganizationId = normalizeRequiredText(organizationId, "organizationId");
+  const organization = assertOrganizationExists(normalizedOrganizationId);
+
+  if (!organization.active) {
+    return cloneOrganization(organization);
+  }
+
+  const disabledOrganization: Organization = {
+    ...organization,
+    active: false,
+    disabledAt: new Date().toISOString(),
+  };
+
+  orgStore.set(disabledOrganization.id, disabledOrganization);
+  persistOrganizationRecord(disabledOrganization);
+  return cloneOrganization(disabledOrganization);
 }
 
 /**
  * ID로 단일 조직을 조회합니다. 없으면 undefined를 반환합니다.
  */
 export function getOrganization(id: string): Organization | undefined {
-  return orgStore.get(id);
+  const organization = orgStore.get(id);
+  return organization ? cloneOrganization(organization) : undefined;
 }
 
 /**
  * 전체 조직 목록을 반환합니다.
  */
-export function listOrganizations(): Organization[] {
-  return Array.from(orgStore.values());
+export function listOrganizations(options: ListQueryOptions = {}): Organization[] {
+  const normalizedSearch = normalizeSearch(options.search);
+  let organizations = Array.from(orgStore.values()).map(cloneOrganization);
+
+  if (normalizedSearch) {
+    organizations = organizations.filter((organization) => {
+      return (
+        organization.name.toLowerCase().includes(normalizedSearch) ||
+        organization.slug.toLowerCase().includes(normalizedSearch)
+      );
+    });
+  }
+
+  return applyPagination(organizations, options);
 }
 
 /**
@@ -176,7 +305,7 @@ export function createMembership(params: {
   const userId = normalizeRequiredText(params.userId, "userId");
   const role = normalizeUserRole(params.role);
 
-  assertOrganizationExists(organizationId);
+  assertOrganizationWritable(organizationId);
 
   const key = membershipKey(organizationId, userId);
   if (membershipStore.has(key)) {
@@ -198,7 +327,7 @@ export function createMembership(params: {
 
   membershipStore.set(key, membership);
   persistMembershipRecord(membership);
-  return membership;
+  return cloneMembership(membership);
 }
 
 /**
@@ -208,22 +337,39 @@ export function getMembership(
   organizationId: string,
   userId: string
 ): OrganizationMembership | undefined {
-  return membershipStore.get(membershipKey(organizationId, userId));
+  const membership = membershipStore.get(membershipKey(organizationId, userId));
+  return membership ? cloneMembership(membership) : undefined;
 }
 
 /**
  * 조직의 전체 멤버십을 반환합니다.
  */
-export function listMemberships(organizationId: string): OrganizationMembership[] {
+export function listMemberships(
+  organizationId: string,
+  options: ListQueryOptions = {}
+): OrganizationMembership[] {
   assertOrganizationExists(organizationId);
 
-  const memberships: OrganizationMembership[] = [];
+  const normalizedSearch = normalizeSearch(options.search);
+  let memberships: OrganizationMembership[] = [];
+
   for (const membership of membershipStore.values()) {
-    if (membership.organizationId === organizationId) {
-      memberships.push(cloneMembership(membership));
+    if (membership.organizationId !== organizationId) {
+      continue;
     }
+
+    if (
+      normalizedSearch &&
+      !membership.userId.toLowerCase().includes(normalizedSearch) &&
+      !membership.role.toLowerCase().includes(normalizedSearch)
+    ) {
+      continue;
+    }
+
+    memberships.push(cloneMembership(membership));
   }
 
+  memberships = applyPagination(memberships, options);
   return memberships;
 }
 
@@ -271,7 +417,7 @@ export function removeMembership(params: {
   const organizationId = normalizeRequiredText(params.organizationId, "organizationId");
   const userId = normalizeRequiredText(params.userId, "userId");
 
-  assertOrganizationExists(organizationId);
+  assertOrganizationWritable(organizationId);
 
   const key = membershipKey(organizationId, userId);
   const existingMembership = membershipStore.get(key);
@@ -283,10 +429,7 @@ export function removeMembership(params: {
     );
   }
 
-  if (
-    existingMembership.role === "owner" &&
-    countOwnerMemberships(organizationId) <= 1
-  ) {
+  if (existingMembership.role === "owner" && countOwnerMemberships(organizationId) <= 1) {
     throw createTenantStoreError(
       409,
       "조직에는 최소 1명의 owner가 필요합니다",
@@ -311,7 +454,7 @@ export function updateMembershipRole(params: {
   const userId = normalizeRequiredText(params.userId, "userId");
   const role = normalizeUserRole(params.role);
 
-  assertOrganizationExists(organizationId);
+  assertOrganizationWritable(organizationId);
 
   const key = membershipKey(organizationId, userId);
   const existingMembership = membershipStore.get(key);
@@ -342,18 +485,152 @@ export function updateMembershipRole(params: {
   };
   membershipStore.set(key, nextMembership);
   persistMembershipRecord(nextMembership);
-  return nextMembership;
+  return cloneMembership(nextMembership);
 }
 
 /**
- * 앱 시작 시점에 외부 저장소에서 읽어온 조직/멤버십으로 인메모리 스토어를 채웁니다.
+ * 조직 초대 토큰을 발급합니다.
+ */
+export function createOrganizationInviteToken(params: {
+  organizationId: string;
+  role: UserRole;
+  expiresAt: string;
+  email?: string;
+  createdByUserId?: string;
+}): OrganizationInviteToken {
+  const organizationId = normalizeRequiredText(params.organizationId, "organizationId");
+  const role = normalizeUserRole(params.role);
+  const expiresAt = normalizeFutureIsoTimestamp(params.expiresAt);
+  const email = normalizeOptionalEmail(params.email);
+  const createdByUserId = normalizeOptionalText(params.createdByUserId);
+
+  assertOrganizationWritable(organizationId);
+
+  let token = generateInviteToken();
+  while (inviteTokenStore.has(token)) {
+    token = generateInviteToken();
+  }
+
+  const inviteToken: OrganizationInviteToken = {
+    token,
+    organizationId,
+    role,
+    email,
+    createdByUserId,
+    createdAt: new Date().toISOString(),
+    expiresAt,
+  };
+
+  inviteTokenStore.set(token, inviteToken);
+  persistOrganizationInviteTokenRecord(inviteToken);
+  return cloneInviteToken(inviteToken);
+}
+
+/**
+ * 토큰 문자열로 조직 초대 토큰을 조회합니다.
+ */
+export function getOrganizationInviteToken(token: string): OrganizationInviteToken | undefined {
+  const normalizedToken = normalizeOptionalText(token);
+  if (!normalizedToken) {
+    return undefined;
+  }
+
+  const inviteToken = inviteTokenStore.get(normalizedToken);
+  return inviteToken ? cloneInviteToken(inviteToken) : undefined;
+}
+
+/**
+ * 초대 토큰을 수락해 조직 멤버십을 생성합니다.
+ */
+export function acceptOrganizationInviteToken(params: {
+  token: string;
+  userId: string;
+  email?: string;
+  expectedOrganizationId?: string;
+}): {
+  membership: OrganizationMembership;
+  inviteToken: OrganizationInviteToken;
+} {
+  const token = normalizeRequiredText(params.token, "token");
+  const userId = normalizeRequiredText(params.userId, "userId");
+  const expectedOrganizationId = normalizeOptionalText(params.expectedOrganizationId);
+  const providedEmail = normalizeOptionalEmail(params.email);
+
+  const inviteToken = inviteTokenStore.get(token);
+  if (!inviteToken) {
+    throw createTenantStoreError(404, "초대 토큰을 찾을 수 없습니다", "TENANT_INVITE_NOT_FOUND");
+  }
+
+  if (expectedOrganizationId && inviteToken.organizationId !== expectedOrganizationId) {
+    throw createTenantStoreError(404, "초대 토큰을 찾을 수 없습니다", "TENANT_INVITE_NOT_FOUND");
+  }
+
+  if (inviteToken.consumedAt) {
+    throw createTenantStoreError(
+      409,
+      "이미 사용된 초대 토큰입니다",
+      "TENANT_INVITE_ALREADY_USED"
+    );
+  }
+
+  if (Date.parse(inviteToken.expiresAt) <= Date.now()) {
+    throw createTenantStoreError(
+      410,
+      "만료된 초대 토큰입니다",
+      "TENANT_INVITE_EXPIRED"
+    );
+  }
+
+  if (inviteToken.email) {
+    if (!providedEmail) {
+      throw createTenantStoreError(
+        400,
+        "이 초대 토큰은 email 입력이 필요합니다",
+        "TENANT_INVITE_EMAIL_REQUIRED"
+      );
+    }
+
+    if (inviteToken.email !== providedEmail) {
+      throw createTenantStoreError(
+        403,
+        "초대 토큰 email이 일치하지 않습니다",
+        "TENANT_INVITE_EMAIL_MISMATCH"
+      );
+    }
+  }
+
+  const membership = createMembership({
+    organizationId: inviteToken.organizationId,
+    userId,
+    role: inviteToken.role,
+  });
+
+  const consumedInviteToken: OrganizationInviteToken = {
+    ...inviteToken,
+    consumedAt: new Date().toISOString(),
+    consumedByUserId: userId,
+  };
+
+  inviteTokenStore.set(consumedInviteToken.token, consumedInviteToken);
+  persistOrganizationInviteTokenRecord(consumedInviteToken);
+
+  return {
+    membership: cloneMembership(membership),
+    inviteToken: cloneInviteToken(consumedInviteToken),
+  };
+}
+
+/**
+ * 앱 시작 시점에 외부 저장소에서 읽어온 조직/멤버십/초대토큰으로 인메모리 스토어를 채웁니다.
  */
 export function hydrateOrganizationStore(params: {
   organizations: Organization[];
   memberships: OrganizationMembership[];
+  inviteTokens?: OrganizationInviteToken[];
 }): void {
   orgStore.clear();
   membershipStore.clear();
+  inviteTokenStore.clear();
 
   for (const organization of params.organizations) {
     orgStore.set(organization.id, cloneOrganization(organization));
@@ -370,6 +647,14 @@ export function hydrateOrganizationStore(params: {
     );
   }
 
+  for (const inviteToken of params.inviteTokens ?? []) {
+    if (!orgStore.has(inviteToken.organizationId)) {
+      continue;
+    }
+
+    inviteTokenStore.set(inviteToken.token, cloneInviteToken(inviteToken));
+  }
+
   bootstrapDefaultOrganization();
 }
 
@@ -380,6 +665,7 @@ export function hydrateOrganizationStore(params: {
 export function clearOrganizationStore(): void {
   orgStore.clear();
   membershipStore.clear();
+  inviteTokenStore.clear();
   clearPersistedOrganizationsAndMemberships();
   bootstrapDefaultOrganization();
 }

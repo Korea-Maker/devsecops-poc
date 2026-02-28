@@ -47,6 +47,23 @@
   - 마지막 owner 보호 정책(`TENANT_OWNER_MIN_REQUIRED`) 적용
   - `required` 모드에서 tenant scope + admin 권한 가드 적용
 
+- [x] Organization/Membership API 하드닝 (Ops MVP Phase G)
+  - 조직 상태 필드 추가: `active`, `disabledAt` (soft disable)
+  - 신규 endpoint: `POST /api/v1/organizations/:id/disable`
+  - 목록 조회 고도화:
+    - `GET /api/v1/organizations` → `search/page/limit`
+    - `GET /api/v1/organizations/:id/memberships` → `search/page/limit`
+    - page/limit 생략 시 기존 응답 계약(배열 전체 반환) 유지
+  - 초대 토큰 플로우 추가:
+    - `POST /api/v1/organizations/:id/invite-tokens`
+    - `POST /api/v1/organizations/invite-tokens/accept`
+    - 1회용(replay 방지), 만료 검증, optional email 바인딩, tenant scope 검증
+  - disabled 조직 쓰기 차단: `409 TENANT_ORG_DISABLED`
+  - PostgreSQL 영속화 확장:
+    - `organizations.active/disabled_at` 컬럼
+    - `organization_invite_tokens` 테이블
+    - migration `005_tenant_org_hardening`
+
 - [x] Tenant 감사 로그 조회 API 초안 구현
   - `GET /api/v1/organizations/:id/audit-logs?limit=50`
   - 조직 생성/멤버 생성/권한변경/멤버삭제 이벤트 적재
@@ -96,7 +113,7 @@
     - `GET /api/v1/auth/google/callback`
   - membership 매핑: `sub` 우선 + `email` fallback, 복수 membership 시 `tenantId` 필수
   - 플랫폼 JWT: RS256 + JWKS(`kid`) 노출, env 키 우선/미설정 시 ephemeral 키 생성 경고
-- [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
+- [x] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [ ] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화

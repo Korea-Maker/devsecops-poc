@@ -144,11 +144,12 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - scan queue jobs (FIFO 순서 보존)
   - scan dead-letter items
   - scan retry schedules (`scanId`, `dueAt`)
-  - organizations
+  - organizations (`active`, `disabledAt` 포함)
   - memberships
+  - organization invite tokens (`role`, `email`, `expiresAt`, `consumedAt` 포함)
   - tenant audit logs
 - 서버 시작 시 경량 migration 버저닝(`schema_migrations`)을 기준으로 schema를 순차/멱등 적용
-- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/retry schedule/org/membership/audit log)를 hydrate
+- 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/retry schedule/org/membership/invite token/audit log)를 hydrate
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
 - 비정상 종료 시 retry timer 대기 작업은 startup recovery에서 즉시 재적재 또는 남은 backoff로 재타이머링
 
@@ -186,19 +187,33 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 
 ### Tenant 관리 API (Phase 5 초안)
 
-- `GET /api/v1/organizations` → 조직 목록 조회
-  - `TENANT_AUTH_MODE=required`에서는 요청 tenant 1개만 반환
+- `GET /api/v1/organizations?search=<text>&page=<n>&limit=<n>` → 조직 목록 조회
+  - `search`는 `name/slug` 부분일치(대소문자 무시)
+  - `page/limit`은 선택값이며, 생략 시 기존처럼 전체 목록 반환(하위호환)
+  - `TENANT_AUTH_MODE=required`에서는 요청 tenant 1개 범위 내에서만 검색/페이지네이션
 - `POST /api/v1/organizations` → 조직 생성 (`admin` 이상)
   - `required` 모드에서 생성자 owner 멤버십 자동 생성
 - `GET /api/v1/organizations/:id` → 단일 조직 조회 (tenant scope 강제)
-- `GET /api/v1/organizations/:id/memberships` → 조직 멤버십 조회 (`admin` 이상)
+  - 조직 상태 필드 포함: `active: boolean`, `disabledAt?: string`
+- `POST /api/v1/organizations/:id/disable` → 조직 soft disable (`admin` 이상)
+- `GET /api/v1/organizations/:id/memberships?search=<text>&page=<n>&limit=<n>` → 조직 멤버십 조회 (`admin` 이상)
+  - `search`는 `userId/role` 부분일치
+  - `page/limit` 생략 시 기존처럼 전체 목록 반환
 - `POST /api/v1/organizations/:id/memberships` → 조직 멤버 추가 (`admin` 이상)
 - `PATCH /api/v1/organizations/:id/memberships/:userId` → 멤버 역할 수정 (`admin` 이상)
 - `DELETE /api/v1/organizations/:id/memberships/:userId` → 조직 멤버 제거 (`admin` 이상)
   - 마지막 owner 삭제는 `409 TENANT_OWNER_MIN_REQUIRED`
+- `POST /api/v1/organizations/:id/invite-tokens` → 조직 멤버 초대 토큰 생성 (`admin` 이상)
+  - body: `{ role, email?, expiresInMinutes? }`
+  - `expiresInMinutes` 기본값 60분, 허용 범위 5~10080분(7일)
+- `POST /api/v1/organizations/invite-tokens/accept` → 초대 토큰 수락 후 멤버십 생성
+  - body: `{ token, email?, userId? }`
+  - `TENANT_AUTH_MODE=required`에서는 `x-tenant-id` scope와 토큰 organization이 일치해야 하며, userId는 인증 컨텍스트를 우선 사용
+  - 토큰은 1회용(replay 방지), 만료 토큰은 `410 TENANT_INVITE_EXPIRED`
 - `GET /api/v1/organizations/:id/audit-logs?limit=50` → 조직 감사 로그 조회 (`admin` 이상)
   - `limit`은 1~100 정수
 
+비활성화된 조직에서는 멤버십 변경/초대 토큰 생성/수락 같은 쓰기 작업이 `409 TENANT_ORG_DISABLED`로 차단된다.
 오류 응답 shape는 scans API와 동일하게 `{ error, code? }`를 사용한다.
 
 ### GitHub CI/CD 연동 (`apps/api` + GitHub Actions)

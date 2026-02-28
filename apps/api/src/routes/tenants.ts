@@ -1,7 +1,10 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import {
+  acceptOrganizationInviteToken,
   createMembership,
   createOrganization,
+  createOrganizationInviteToken,
+  disableOrganization,
   getOrganization,
   listMemberships,
   listOrganizations,
@@ -17,15 +20,54 @@ import {
   requireMinimumRole,
   tenantAuthOnRequest,
 } from "../tenants/auth.js";
-import type { UserRole } from "../tenants/types.js";
+import type { Organization, UserRole } from "../tenants/types.js";
 
 const VALID_USER_ROLES = ["owner", "admin", "member", "viewer"] as const;
 const VALID_USER_ROLE_SET: ReadonlySet<string> = new Set(VALID_USER_ROLES);
+
+const DEFAULT_PAGINATION_PAGE = 1;
+const DEFAULT_PAGINATION_LIMIT = 20;
+const MAX_PAGINATION_LIMIT = 100;
+const DEFAULT_INVITE_EXPIRES_MINUTES = 60;
+const MIN_INVITE_EXPIRES_MINUTES = 5;
+const MAX_INVITE_EXPIRES_MINUTES = 60 * 24 * 7;
 
 interface TenantRouteErrorBody {
   error: string;
   code?: string;
 }
+
+interface ListQueryOptions {
+  search?: string;
+  page?: number;
+  limit?: number;
+}
+
+interface ParsedListQuerySuccess {
+  ok: true;
+  options: ListQueryOptions;
+}
+
+interface ParsedListQueryFailure {
+  ok: false;
+  error: string;
+  code: string;
+}
+
+type ParsedListQueryResult = ParsedListQuerySuccess | ParsedListQueryFailure;
+
+interface ParsedOptionalTextSuccess {
+  ok: true;
+  value?: string;
+}
+
+interface ParsedOptionalTextFailure {
+  ok: false;
+  error: string;
+  code: string;
+}
+
+type ParsedOptionalTextResult = ParsedOptionalTextSuccess | ParsedOptionalTextFailure;
 
 function sendError(
   reply: FastifyReply,
@@ -106,6 +148,26 @@ function ensureTenantScope(
   return false;
 }
 
+function ensureOrganizationWritable(reply: FastifyReply, organizationId: string): boolean {
+  const organization = getOrganization(organizationId);
+  if (!organization) {
+    void sendError(reply, 404, "조직을 찾을 수 없습니다", "TENANT_ORG_NOT_FOUND");
+    return false;
+  }
+
+  if (!organization.active) {
+    void sendError(
+      reply,
+      409,
+      "비활성화된 조직에는 변경 작업을 수행할 수 없습니다",
+      "TENANT_ORG_DISABLED"
+    );
+    return false;
+  }
+
+  return true;
+}
+
 function parseAuditLimit(rawLimit: unknown): number | null {
   if (rawLimit === undefined) {
     return 50;
@@ -119,6 +181,175 @@ function parseAuditLimit(rawLimit: unknown): number | null {
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
     return null;
   }
+
+  return parsed;
+}
+
+function parseIntegerQuery(
+  value: unknown,
+  options: {
+    defaultValue: number;
+    min: number;
+    max: number;
+  }
+): number | null {
+  if (value === undefined) {
+    return options.defaultValue;
+  }
+
+  let parsed: number | null = null;
+
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (!/^\d+$/.test(normalized)) {
+      return null;
+    }
+    parsed = Number.parseInt(normalized, 10);
+  } else if (typeof value === "number" && Number.isInteger(value)) {
+    parsed = value;
+  }
+
+  if (parsed === null) {
+    return null;
+  }
+
+  if (parsed < options.min || parsed > options.max) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function parseListQuery(query: {
+  page?: unknown;
+  limit?: unknown;
+  search?: unknown;
+}): ParsedListQueryResult {
+  let search: string | undefined;
+  if (query.search !== undefined) {
+    if (typeof query.search !== "string") {
+      return {
+        ok: false,
+        error: "search는 문자열이어야 합니다",
+        code: "TENANT_INVALID_SEARCH",
+      };
+    }
+
+    const normalizedSearch = query.search.trim();
+    search = normalizedSearch.length > 0 ? normalizedSearch : undefined;
+  }
+
+  const hasPaginationQuery = query.page !== undefined || query.limit !== undefined;
+  if (!hasPaginationQuery) {
+    return {
+      ok: true,
+      options: { search },
+    };
+  }
+
+  const page = parseIntegerQuery(query.page, {
+    defaultValue: DEFAULT_PAGINATION_PAGE,
+    min: 1,
+    max: 100_000,
+  });
+  const limit = parseIntegerQuery(query.limit, {
+    defaultValue: DEFAULT_PAGINATION_LIMIT,
+    min: 1,
+    max: MAX_PAGINATION_LIMIT,
+  });
+
+  if (page === null || limit === null) {
+    return {
+      ok: false,
+      error: `page는 1 이상의 정수, limit은 1~${MAX_PAGINATION_LIMIT} 정수여야 합니다`,
+      code: "TENANT_INVALID_PAGINATION",
+    };
+  }
+
+  return {
+    ok: true,
+    options: {
+      search,
+      page,
+      limit,
+    },
+  };
+}
+
+function applyOrganizationSearch(
+  organizations: Organization[],
+  search: string | undefined
+): Organization[] {
+  if (!search) {
+    return organizations;
+  }
+
+  const normalizedSearch = search.toLowerCase();
+  return organizations.filter((organization) => {
+    return (
+      organization.name.toLowerCase().includes(normalizedSearch) ||
+      organization.slug.toLowerCase().includes(normalizedSearch)
+    );
+  });
+}
+
+function applyPagination<T>(
+  items: T[],
+  page: number | undefined,
+  limit: number | undefined
+): T[] {
+  if (page === undefined && limit === undefined) {
+    return items;
+  }
+
+  const normalizedPage = page ?? DEFAULT_PAGINATION_PAGE;
+  const normalizedLimit = limit ?? DEFAULT_PAGINATION_LIMIT;
+  const offset = (normalizedPage - 1) * normalizedLimit;
+  return items.slice(offset, offset + normalizedLimit);
+}
+
+function parseOptionalNonEmptyText(
+  value: unknown,
+  fieldName: string,
+  code: string
+): ParsedOptionalTextResult {
+  if (value === undefined) {
+    return { ok: true };
+  }
+
+  if (typeof value !== "string") {
+    return {
+      ok: false,
+      error: `${fieldName}는 문자열이어야 합니다`,
+      code,
+    };
+  }
+
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return {
+      ok: false,
+      error: `${fieldName}는 비어 있을 수 없습니다`,
+      code,
+    };
+  }
+
+  return {
+    ok: true,
+    value: normalized,
+  };
+}
+
+function parseInviteExpiryMinutes(value: unknown): number | null {
+  if (value === undefined) {
+    return DEFAULT_INVITE_EXPIRES_MINUTES;
+  }
+
+  const parsed = parseIntegerQuery(value, {
+    defaultValue: DEFAULT_INVITE_EXPIRES_MINUTES,
+    min: MIN_INVITE_EXPIRES_MINUTES,
+    max: MAX_INVITE_EXPIRES_MINUTES,
+  });
 
   return parsed;
 }
@@ -152,13 +383,33 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /** GET /api/v1/organizations — 조직 목록 조회 */
-  app.get("/api/v1/organizations", async (request, reply) => {
-    if (getTenantAuthMode() === "required") {
-      const organization = getOrganization(request.tenantContext.tenantId);
-      return reply.status(200).send(organization ? [organization] : []);
+  app.get<{
+    Querystring: { page?: string; limit?: string; search?: string };
+  }>("/api/v1/organizations", async (request, reply) => {
+    const listQuery = parseListQuery(request.query);
+    if (!listQuery.ok) {
+      return sendError(reply, 400, listQuery.error, listQuery.code);
     }
 
-    return reply.status(200).send(listOrganizations());
+    if (getTenantAuthMode() === "required") {
+      const organization = getOrganization(request.tenantContext.tenantId);
+      const scopedOrganizations = organization ? [organization] : [];
+      const searchedOrganizations = applyOrganizationSearch(
+        scopedOrganizations,
+        listQuery.options.search
+      );
+      return reply
+        .status(200)
+        .send(
+          applyPagination(
+            searchedOrganizations,
+            listQuery.options.page,
+            listQuery.options.limit
+          )
+        );
+    }
+
+    return reply.status(200).send(listOrganizations(listQuery.options));
   });
 
   /** POST /api/v1/organizations — 조직 생성 */
@@ -242,9 +493,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     }
   );
 
-  /** GET /api/v1/organizations/:id/memberships — 조직 멤버십 조회 */
-  app.get<{ Params: { id: string } }>(
-    "/api/v1/organizations/:id/memberships",
+  /** POST /api/v1/organizations/:id/disable — 조직 비활성화 */
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/organizations/:id/disable",
     async (request, reply) => {
       if (!requireMinimumRole(request, reply, "admin")) {
         return;
@@ -260,9 +511,37 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         return;
       }
 
-      return reply.status(200).send(listMemberships(request.params.id));
+      const organization = disableOrganization(request.params.id);
+      return reply.status(200).send({ organization });
     }
   );
+
+  /** GET /api/v1/organizations/:id/memberships — 조직 멤버십 조회 */
+  app.get<{
+    Params: { id: string };
+    Querystring: { page?: string; limit?: string; search?: string };
+  }>("/api/v1/organizations/:id/memberships", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "admin")) {
+      return;
+    }
+
+    if (
+      !ensureTenantScope(
+        reply,
+        request.tenantContext.tenantId,
+        request.params.id
+      )
+    ) {
+      return;
+    }
+
+    const listQuery = parseListQuery(request.query);
+    if (!listQuery.ok) {
+      return sendError(reply, 400, listQuery.error, listQuery.code);
+    }
+
+    return reply.status(200).send(listMemberships(request.params.id, listQuery.options));
+  });
 
   /** POST /api/v1/organizations/:id/memberships — 조직 멤버 추가 */
   app.post<{
@@ -280,6 +559,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         request.params.id
       )
     ) {
+      return;
+    }
+
+    if (!ensureOrganizationWritable(reply, request.params.id)) {
       return;
     }
 
@@ -340,6 +623,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
+    if (!ensureOrganizationWritable(reply, request.params.id)) {
+      return;
+    }
+
     if (!isUserRole(request.body.role)) {
       return sendError(
         reply,
@@ -386,6 +673,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         return;
       }
 
+      if (!ensureOrganizationWritable(reply, request.params.id)) {
+        return;
+      }
+
       const membership = removeMembership({
         organizationId: request.params.id,
         userId: request.params.userId,
@@ -404,6 +695,137 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       return reply.status(200).send({ membership });
     }
   );
+
+  /** POST /api/v1/organizations/:id/invite-tokens — 조직 멤버 초대 토큰 생성 */
+  app.post<{
+    Params: { id: string };
+    Body: { role?: unknown; email?: unknown; expiresInMinutes?: unknown };
+  }>("/api/v1/organizations/:id/invite-tokens", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "admin")) {
+      return;
+    }
+
+    if (
+      !ensureTenantScope(
+        reply,
+        request.tenantContext.tenantId,
+        request.params.id
+      )
+    ) {
+      return;
+    }
+
+    if (!ensureOrganizationWritable(reply, request.params.id)) {
+      return;
+    }
+
+    if (!isUserRole(request.body.role)) {
+      return sendError(
+        reply,
+        400,
+        `role은 ${VALID_USER_ROLES.join(", ")} 중 하나여야 합니다`,
+        "TENANT_INVALID_ROLE"
+      );
+    }
+
+    const parsedEmail = parseOptionalNonEmptyText(
+      request.body.email,
+      "email",
+      "TENANT_INVALID_EMAIL"
+    );
+    if (!parsedEmail.ok) {
+      return sendError(reply, 400, parsedEmail.error, parsedEmail.code);
+    }
+
+    const expiresInMinutes = parseInviteExpiryMinutes(request.body.expiresInMinutes);
+    if (expiresInMinutes === null) {
+      return sendError(
+        reply,
+        400,
+        `expiresInMinutes는 ${MIN_INVITE_EXPIRES_MINUTES}~${MAX_INVITE_EXPIRES_MINUTES} 범위의 정수여야 합니다`,
+        "TENANT_INVALID_EXPIRES_IN_MINUTES"
+      );
+    }
+
+    const inviteToken = createOrganizationInviteToken({
+      organizationId: request.params.id,
+      role: request.body.role,
+      email: parsedEmail.value,
+      createdByUserId: request.tenantContext.userId,
+      expiresAt: new Date(Date.now() + expiresInMinutes * 60_000).toISOString(),
+    });
+
+    return reply.status(201).send({ inviteToken });
+  });
+
+  /** POST /api/v1/organizations/invite-tokens/accept — 조직 멤버 초대 토큰 수락 */
+  app.post<{
+    Body: { token?: unknown; userId?: unknown; email?: unknown };
+  }>("/api/v1/organizations/invite-tokens/accept", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "viewer")) {
+      return;
+    }
+
+    if (!isNonEmptyString(request.body.token)) {
+      return sendError(
+        reply,
+        400,
+        "token은 비어 있을 수 없습니다",
+        "TENANT_INVALID_TOKEN"
+      );
+    }
+
+    const parsedEmail = parseOptionalNonEmptyText(
+      request.body.email,
+      "email",
+      "TENANT_INVALID_EMAIL"
+    );
+    if (!parsedEmail.ok) {
+      return sendError(reply, 400, parsedEmail.error, parsedEmail.code);
+    }
+
+    const fallbackUserId = parseOptionalNonEmptyText(
+      request.body.userId,
+      "userId",
+      "TENANT_INVALID_USERID"
+    );
+    if (!fallbackUserId.ok) {
+      return sendError(reply, 400, fallbackUserId.error, fallbackUserId.code);
+    }
+
+    const userId = request.tenantContext.userId ?? fallbackUserId.value;
+    if (!userId) {
+      return sendError(
+        reply,
+        400,
+        "userId는 비어 있을 수 없습니다",
+        "TENANT_INVITE_USER_ID_REQUIRED"
+      );
+    }
+
+    const expectedOrganizationId =
+      getTenantAuthMode() === "required" ? request.tenantContext.tenantId : undefined;
+
+    const accepted = acceptOrganizationInviteToken({
+      token: request.body.token,
+      userId,
+      email: parsedEmail.value,
+      expectedOrganizationId,
+    });
+
+    createTenantAuditLog({
+      organizationId: accepted.membership.organizationId,
+      actorUserId: request.tenantContext.userId,
+      action: "membership.created",
+      targetUserId: accepted.membership.userId,
+      details: {
+        role: accepted.membership.role,
+        source: "invite_token",
+      },
+    });
+
+    return reply.status(201).send({ membership: accepted.membership });
+  });
 
   /** GET /api/v1/organizations/:id/audit-logs — 조직 감사 로그 조회 */
   app.get<{

@@ -4,6 +4,7 @@ import {
   getConfiguredDataBackend,
   initializeDataBackend,
   parseDataBackend,
+  persistOrganizationInviteTokenRecord,
   persistQueueState,
   resetDataBackendForTests,
 } from "../src/storage/backend.js";
@@ -153,6 +154,7 @@ describe("data backend config", () => {
       "002_tenants",
       "003_scan_queue",
       "004_scan_retry_schedule",
+      "005_tenant_org_hardening",
     ]);
 
     const scansTableCreateStatements = mock.query.mock.calls.filter(([sql]) =>
@@ -349,4 +351,105 @@ describe("data backend config", () => {
       .map(([, values]) => values);
     expect(retryInsertValues).toEqual([["scan-retry-a", "2026-03-01T00:20:00.000Z"]]);
   });
+
+  it("postgres 초기화 시 organization invite token 상태를 hydrate 해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const mock = createMockSqlClient((sql) => {
+      if (sql.includes("FROM organizations")) {
+        return [
+          {
+            id: "org-invite-1",
+            name: "Invite Org",
+            slug: "invite-org",
+            active: true,
+            created_at: "2026-03-01T00:00:00.000Z",
+            disabled_at: null,
+          },
+        ];
+      }
+
+      if (sql.includes("FROM organization_invite_tokens")) {
+        return [
+          {
+            token: "token-1",
+            organization_id: "org-invite-1",
+            role: "member",
+            email: "invitee@example.com",
+            created_by_user_id: "admin-user",
+            created_at: "2026-03-01T00:10:00.000Z",
+            expires_at: "2026-03-01T01:10:00.000Z",
+            consumed_at: null,
+            consumed_by_user_id: null,
+          },
+        ];
+      }
+
+      return [];
+    });
+
+    const result = await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    expect(result.activeBackend).toBe("postgres");
+    expect(result.persistedState.inviteTokens).toEqual([
+      {
+        token: "token-1",
+        organizationId: "org-invite-1",
+        role: "member",
+        email: "invitee@example.com",
+        createdByUserId: "admin-user",
+        createdAt: "2026-03-01T00:10:00.000Z",
+        expiresAt: "2026-03-01T01:10:00.000Z",
+      },
+    ]);
+  });
+
+  it("persistOrganizationInviteTokenRecord는 postgres 모드에서 초대 토큰 upsert를 저장해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const mock = createMockSqlClient();
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    persistOrganizationInviteTokenRecord({
+      token: "token-save-1",
+      organizationId: "org-save-1",
+      role: "viewer",
+      email: "viewer@example.com",
+      createdByUserId: "admin-save",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      expiresAt: "2026-03-01T00:30:00.000Z",
+      consumedAt: "2026-03-01T00:05:00.000Z",
+      consumedByUserId: "viewer-user",
+    });
+
+    await resetDataBackendForTests();
+
+    const inviteInsertValues = mock.query.mock.calls
+      .filter(([sql]) => String(sql).includes("INSERT INTO organization_invite_tokens"))
+      .map(([, values]) => values);
+
+    expect(inviteInsertValues).toEqual([
+      [
+        "token-save-1",
+        "org-save-1",
+        "viewer",
+        "viewer@example.com",
+        "admin-save",
+        "2026-03-01T00:00:00.000Z",
+        "2026-03-01T00:30:00.000Z",
+        "2026-03-01T00:05:00.000Z",
+        "viewer-user",
+      ],
+    ]);
+  });
+
 });
