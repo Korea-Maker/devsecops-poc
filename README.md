@@ -96,11 +96,18 @@
   - `Authorization: Bearer <token>` 필수
   - `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL` 필수 (`JWT_JWKS_URL`은 http/https URL)
   - JOSE 기반 remote JWKS 검증 + `iss`/`aud` + 서명 알고리즘(`RS256 | ES256`) 검증
-  - claim 매핑(모두 required):
-    - tenantId: `tenant_id` (fallback: `tid`)
-    - userId: `sub` (fallback: `user_id`)
-    - role: `role` (fallback: `roles[0]`) — `owner | admin | member | viewer`
+  - claim 매핑(모두 required, env override 가능):
+    - tenantId: `JWT_TENANT_ID_CLAIM` (기본 `tenant_id`)
+      - fallback: `JWT_TENANT_ID_FALLBACK_CLAIMS` (기본 `tid`, CSV)
+    - userId: `JWT_USER_ID_CLAIM` (기본 `sub`)
+      - fallback: `JWT_USER_ID_FALLBACK_CLAIMS` (기본 `user_id`, CSV)
+    - role: `JWT_ROLE_CLAIM` (기본 `role`)
+      - fallback: `JWT_ROLE_FALLBACK_CLAIMS` (기본 `roles[0]`, CSV)
+      - role 값은 `owner | admin | member | viewer`
+    - fallback env를 빈 문자열로 설정하면 fallback 비활성화
+    - claim selector 형식: `<claim>` 또는 `<claim>[n]`
   - 검증/클레임 실패 시 401 + `{ error, code }`
+  - JWT 구성/claim 매핑 설정이 잘못되면 503 + `{ error, code }`
 - queue/dead-letter 수동 운영 API(`queue/status`, `queue/process-next`, `dead-letters`, `redrive`)는 `admin` 이상(role hierarchy: `owner > admin > member > viewer`)만 접근 가능
 
 OIDC 로그인 + 플랫폼 토큰 발급 계약:
@@ -174,6 +181,12 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
 - `JWT_ISSUER`: JWT issuer (`AUTH_MODE=jwt`에서 필수)
 - `JWT_AUDIENCE`: JWT audience (`AUTH_MODE=jwt`에서 필수)
 - `JWT_JWKS_URL`: JWT JWKS endpoint (`AUTH_MODE=jwt`에서 필수, http/https)
+- `JWT_TENANT_ID_CLAIM`: tenantId primary claim selector (기본 `tenant_id`)
+- `JWT_TENANT_ID_FALLBACK_CLAIMS`: tenantId fallback selector CSV (기본 `tid`, 빈 문자열이면 비활성)
+- `JWT_USER_ID_CLAIM`: userId primary claim selector (기본 `sub`)
+- `JWT_USER_ID_FALLBACK_CLAIMS`: userId fallback selector CSV (기본 `user_id`, 빈 문자열이면 비활성)
+- `JWT_ROLE_CLAIM`: role primary claim selector (기본 `role`)
+- `JWT_ROLE_FALLBACK_CLAIMS`: role fallback selector CSV (기본 `roles[0]`, 빈 문자열이면 비활성)
 - `OIDC_GOOGLE_CLIENT_ID`: Google OAuth client id (`/api/v1/auth/google/*`에서 필수)
 - `OIDC_GOOGLE_CLIENT_SECRET`: Google OAuth client secret (`/api/v1/auth/google/*`에서 필수)
 - `OIDC_GOOGLE_REDIRECT_URI`: Google OAuth redirect URI (`/api/v1/auth/google/*`에서 필수)

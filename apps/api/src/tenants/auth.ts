@@ -21,6 +21,16 @@ const USER_ROLE_PRIORITY: Record<UserRole, number> = {
 const VALID_USER_ROLES = Object.keys(USER_ROLE_PRIORITY) as UserRole[];
 const VALID_USER_ROLE_SET: ReadonlySet<string> = new Set(VALID_USER_ROLES);
 const JWT_ALLOWED_ALGORITHMS = ["RS256", "ES256"] as const;
+const JWT_CLAIM_SELECTOR_PATTERN = /^([^\s\[\]]+)(?:\[(\d+)\])?$/;
+
+const DEFAULT_JWT_CLAIM_MAPPING = {
+  tenantIdClaim: "tenant_id",
+  tenantIdFallbackClaims: ["tid"],
+  userIdClaim: "sub",
+  userIdFallbackClaims: ["user_id"],
+  roleClaim: "role",
+  roleFallbackClaims: ["roles[0]"],
+} as const;
 
 const remoteJwksCache = new Map<string, JWTVerifyGetKey>();
 
@@ -66,12 +76,47 @@ interface JwtAuthConfigResolved {
   audience: string;
   jwksUrl: string;
   jwksResolver: JWTVerifyGetKey;
+  claimMapping: JwtClaimMappingResolved;
 }
 
 export interface JwtAuthConfig {
   issuer?: string;
   audience?: string;
   jwksUrl?: string;
+}
+
+export interface JwtClaimMappingConfig {
+  tenantIdClaim: string;
+  tenantIdFallbackClaims: string[];
+  userIdClaim: string;
+  userIdFallbackClaims: string[];
+  roleClaim: string;
+  roleFallbackClaims: string[];
+}
+
+interface JwtClaimSelector {
+  raw: string;
+  claimName: string;
+  arrayIndex?: number;
+}
+
+interface JwtClaimFieldMappingResolved {
+  selectors: readonly JwtClaimSelector[];
+  displayName: string;
+  primarySelectorRaw: string;
+}
+
+interface JwtClaimMappingResolved {
+  tenantId: JwtClaimFieldMappingResolved;
+  userId: JwtClaimFieldMappingResolved;
+  role: JwtClaimFieldMappingResolved;
+}
+
+interface JwtClaimSelectorResolutionParams {
+  primaryEnvName: string;
+  fallbackEnvName: string;
+  primaryClaim: string;
+  fallbackClaims: readonly string[];
 }
 
 declare module "fastify" {
@@ -122,6 +167,27 @@ function readTrimmedEnv(name: string): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function readTrimmedEnvList(name: string): string[] | undefined {
+  const rawValue = process.env[name];
+  if (typeof rawValue !== "string") {
+    return undefined;
+  }
+
+  return rawValue
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function readConfiguredClaim(name: string, defaultValue: string): string {
+  const rawValue = process.env[name];
+  if (typeof rawValue !== "string") {
+    return defaultValue;
+  }
+
+  return rawValue.trim();
+}
+
 function isUserRole(value: string): value is UserRole {
   return VALID_USER_ROLE_SET.has(value);
 }
@@ -149,6 +215,149 @@ function getOrCreateRemoteJwks(jwksUrl: URL): JWTVerifyGetKey {
   const jwksResolver = createRemoteJWKSet(jwksUrl);
   remoteJwksCache.set(cacheKey, jwksResolver);
   return jwksResolver;
+}
+
+function parseJwtClaimSelector(selectorRaw: string): JwtClaimSelector | null {
+  const normalized = selectorRaw.trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const match = JWT_CLAIM_SELECTOR_PATTERN.exec(normalized);
+  if (!match) {
+    return null;
+  }
+
+  const claimName = match[1];
+  const arrayIndexText = match[2];
+  if (!arrayIndexText) {
+    return {
+      raw: normalized,
+      claimName,
+    };
+  }
+
+  const arrayIndex = Number.parseInt(arrayIndexText, 10);
+  if (!Number.isSafeInteger(arrayIndex) || arrayIndex < 0) {
+    return null;
+  }
+
+  return {
+    raw: normalized,
+    claimName,
+    arrayIndex,
+  };
+}
+
+function dedupeClaimSelectors(claimSelectors: readonly string[]): string[] {
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+
+  for (const selector of claimSelectors) {
+    const normalized = selector.trim();
+    if (normalized.length === 0 || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+
+  return deduped;
+}
+
+function formatClaimSelectorList(selectors: readonly JwtClaimSelector[]): string {
+  return selectors.map((selector) => selector.raw).join(" 또는 ");
+}
+
+function resolveClaimSelectors(
+  params: JwtClaimSelectorResolutionParams
+):
+  | { ok: true; fieldMapping: JwtClaimFieldMappingResolved }
+  | TenantAuthResolutionFailure {
+  const primarySelectorRaw = params.primaryClaim.trim();
+  if (primarySelectorRaw.length === 0) {
+    return failAuth(
+      503,
+      `${params.primaryEnvName}는 비어 있을 수 없습니다`,
+      "TENANT_AUTH_JWT_CLAIM_MAPPING_INVALID"
+    );
+  }
+
+  const selectorCandidates = dedupeClaimSelectors([
+    primarySelectorRaw,
+    ...params.fallbackClaims,
+  ]);
+
+  const selectors: JwtClaimSelector[] = [];
+  for (let index = 0; index < selectorCandidates.length; index += 1) {
+    const selectorCandidate = selectorCandidates[index];
+    const parsedSelector = parseJwtClaimSelector(selectorCandidate);
+    if (!parsedSelector) {
+      const sourceEnvName = index === 0 ? params.primaryEnvName : params.fallbackEnvName;
+      return failAuth(
+        503,
+        `${sourceEnvName} 값(${selectorCandidate})은 '<claim>' 또는 '<claim>[n]' 형식이어야 합니다`,
+        "TENANT_AUTH_JWT_CLAIM_MAPPING_INVALID"
+      );
+    }
+
+    selectors.push(parsedSelector);
+  }
+
+  return {
+    ok: true,
+    fieldMapping: {
+      selectors,
+      displayName: formatClaimSelectorList(selectors),
+      primarySelectorRaw,
+    },
+  };
+}
+
+function resolveJwtClaimMappingConfig():
+  | { ok: true; claimMapping: JwtClaimMappingResolved }
+  | TenantAuthResolutionFailure {
+  const claimMappingConfig = getJwtClaimMappingConfig();
+
+  const tenantSelectorResolution = resolveClaimSelectors({
+    primaryEnvName: "JWT_TENANT_ID_CLAIM",
+    fallbackEnvName: "JWT_TENANT_ID_FALLBACK_CLAIMS",
+    primaryClaim: claimMappingConfig.tenantIdClaim,
+    fallbackClaims: claimMappingConfig.tenantIdFallbackClaims,
+  });
+  if (!tenantSelectorResolution.ok) {
+    return tenantSelectorResolution;
+  }
+
+  const userSelectorResolution = resolveClaimSelectors({
+    primaryEnvName: "JWT_USER_ID_CLAIM",
+    fallbackEnvName: "JWT_USER_ID_FALLBACK_CLAIMS",
+    primaryClaim: claimMappingConfig.userIdClaim,
+    fallbackClaims: claimMappingConfig.userIdFallbackClaims,
+  });
+  if (!userSelectorResolution.ok) {
+    return userSelectorResolution;
+  }
+
+  const roleSelectorResolution = resolveClaimSelectors({
+    primaryEnvName: "JWT_ROLE_CLAIM",
+    fallbackEnvName: "JWT_ROLE_FALLBACK_CLAIMS",
+    primaryClaim: claimMappingConfig.roleClaim,
+    fallbackClaims: claimMappingConfig.roleFallbackClaims,
+  });
+  if (!roleSelectorResolution.ok) {
+    return roleSelectorResolution;
+  }
+
+  return {
+    ok: true,
+    claimMapping: {
+      tenantId: tenantSelectorResolution.fieldMapping,
+      userId: userSelectorResolution.fieldMapping,
+      role: roleSelectorResolution.fieldMapping,
+    },
+  };
 }
 
 function resolveJwtAuthConfig():
@@ -195,6 +404,11 @@ function resolveJwtAuthConfig():
     );
   }
 
+  const claimMappingResolution = resolveJwtClaimMappingConfig();
+  if (!claimMappingResolution.ok) {
+    return claimMappingResolution;
+  }
+
   return {
     ok: true,
     config: {
@@ -202,26 +416,42 @@ function resolveJwtAuthConfig():
       audience,
       jwksUrl,
       jwksResolver: getOrCreateRemoteJwks(parsedJwksUrl),
+      claimMapping: claimMappingResolution.claimMapping,
     },
   };
 }
 
-function readStringClaim(payload: JWTPayload, claimName: string): string | undefined {
-  const claimValue = payload[claimName];
-  if (typeof claimValue !== "string") {
+function readStringValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
     return undefined;
   }
 
-  const trimmed = claimValue.trim();
+  const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function readClaimWithFallback(
+function readClaimBySelector(
   payload: JWTPayload,
-  claimNames: readonly string[]
+  selector: JwtClaimSelector
 ): string | undefined {
-  for (const claimName of claimNames) {
-    const claimValue = readStringClaim(payload, claimName);
+  const claimValue = payload[selector.claimName];
+  if (selector.arrayIndex === undefined) {
+    return readStringValue(claimValue);
+  }
+
+  if (!Array.isArray(claimValue)) {
+    return undefined;
+  }
+
+  return readStringValue(claimValue[selector.arrayIndex]);
+}
+
+function readClaimWithMapping(
+  payload: JWTPayload,
+  selectors: readonly JwtClaimSelector[]
+): string | undefined {
+  for (const selector of selectors) {
+    const claimValue = readClaimBySelector(payload, selector);
     if (claimValue) {
       return claimValue;
     }
@@ -230,52 +460,33 @@ function readClaimWithFallback(
   return undefined;
 }
 
-function readRoleClaim(payload: JWTPayload): string | undefined {
-  const directRole = readStringClaim(payload, "role");
-  if (directRole) {
-    return directRole;
-  }
-
-  const rolesClaim = payload.roles;
-  if (!Array.isArray(rolesClaim)) {
-    return undefined;
-  }
-
-  const firstRole = rolesClaim[0];
-  if (typeof firstRole !== "string") {
-    return undefined;
-  }
-
-  const trimmed = firstRole.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
 function resolveTenantContextFromJwtPayload(
-  payload: JWTPayload
+  payload: JWTPayload,
+  claimMapping: JwtClaimMappingResolved
 ): TenantAuthResolution {
-  const tenantId = readClaimWithFallback(payload, ["tenant_id", "tid"]);
+  const tenantId = readClaimWithMapping(payload, claimMapping.tenantId.selectors);
   if (!tenantId) {
     return failAuth(
       401,
-      "JWT tenant_id 또는 tid 클레임이 필요합니다",
+      `JWT ${claimMapping.tenantId.displayName} 클레임이 필요합니다`,
       "TENANT_AUTH_TENANT_ID_CLAIM_REQUIRED"
     );
   }
 
-  const userId = readClaimWithFallback(payload, ["sub", "user_id"]);
+  const userId = readClaimWithMapping(payload, claimMapping.userId.selectors);
   if (!userId) {
     return failAuth(
       401,
-      "JWT sub 또는 user_id 클레임이 필요합니다",
+      `JWT ${claimMapping.userId.displayName} 클레임이 필요합니다`,
       "TENANT_AUTH_USER_ID_CLAIM_REQUIRED"
     );
   }
 
-  const roleClaim = readRoleClaim(payload);
+  const roleClaim = readClaimWithMapping(payload, claimMapping.role.selectors);
   if (!roleClaim) {
     return failAuth(
       401,
-      "JWT role 또는 roles[0] 클레임이 필요합니다",
+      `JWT ${claimMapping.role.displayName} 클레임이 필요합니다`,
       "TENANT_AUTH_USER_ROLE_CLAIM_REQUIRED"
     );
   }
@@ -284,7 +495,7 @@ function resolveTenantContextFromJwtPayload(
   if (!isUserRole(normalizedRole)) {
     return failAuth(
       401,
-      `JWT role 클레임은 ${VALID_USER_ROLES.join(", ")} 중 하나여야 합니다`,
+      `JWT ${claimMapping.role.primarySelectorRaw} 클레임은 ${VALID_USER_ROLES.join(", ")} 중 하나여야 합니다`,
       "TENANT_AUTH_INVALID_USER_ROLE_CLAIM"
     );
   }
@@ -480,7 +691,10 @@ async function resolveTenantContextFromJwtAuth(
     return verificationResult;
   }
 
-  return resolveTenantContextFromJwtPayload(verificationResult.payload);
+  return resolveTenantContextFromJwtPayload(
+    verificationResult.payload,
+    jwtConfigResolution.config.claimMapping
+  );
 }
 
 export function getTenantAuthMode(): TenantAuthMode {
@@ -499,6 +713,46 @@ export function getJwtAuthConfig(): JwtAuthConfig {
     audience: readTrimmedEnv("JWT_AUDIENCE"),
     jwksUrl: readTrimmedEnv("JWT_JWKS_URL"),
   };
+}
+
+export function getJwtClaimMappingConfig(): JwtClaimMappingConfig {
+  const tenantIdFallbackClaims = readTrimmedEnvList("JWT_TENANT_ID_FALLBACK_CLAIMS");
+  const userIdFallbackClaims = readTrimmedEnvList("JWT_USER_ID_FALLBACK_CLAIMS");
+  const roleFallbackClaims = readTrimmedEnvList("JWT_ROLE_FALLBACK_CLAIMS");
+
+  return {
+    tenantIdClaim: readConfiguredClaim(
+      "JWT_TENANT_ID_CLAIM",
+      DEFAULT_JWT_CLAIM_MAPPING.tenantIdClaim
+    ),
+    tenantIdFallbackClaims:
+      tenantIdFallbackClaims ?? [...DEFAULT_JWT_CLAIM_MAPPING.tenantIdFallbackClaims],
+    userIdClaim: readConfiguredClaim("JWT_USER_ID_CLAIM", DEFAULT_JWT_CLAIM_MAPPING.userIdClaim),
+    userIdFallbackClaims:
+      userIdFallbackClaims ?? [...DEFAULT_JWT_CLAIM_MAPPING.userIdFallbackClaims],
+    roleClaim: readConfiguredClaim("JWT_ROLE_CLAIM", DEFAULT_JWT_CLAIM_MAPPING.roleClaim),
+    roleFallbackClaims:
+      roleFallbackClaims ?? [...DEFAULT_JWT_CLAIM_MAPPING.roleFallbackClaims],
+  };
+}
+
+export function validateTenantAuthConfiguration():
+  | { ok: true }
+  | TenantAuthResolutionFailure {
+  if (getTenantAuthMode() !== "required") {
+    return { ok: true };
+  }
+
+  if (getAuthMode() !== "jwt") {
+    return { ok: true };
+  }
+
+  const jwtConfigResolution = resolveJwtAuthConfig();
+  if (!jwtConfigResolution.ok) {
+    return jwtConfigResolution;
+  }
+
+  return { ok: true };
 }
 
 export function hasRoleAtLeast(

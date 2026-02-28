@@ -141,7 +141,10 @@
 
 ## 아직 남은 작업 (Phase 5 후속)
 
-- [ ] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정
+- [x] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정 (Ops MVP Phase L)
+  - 신규 env: `JWT_TENANT_ID_CLAIM`(+`JWT_TENANT_ID_FALLBACK_CLAIMS`), `JWT_USER_ID_CLAIM`(+`JWT_USER_ID_FALLBACK_CLAIMS`), `JWT_ROLE_CLAIM`(+`JWT_ROLE_FALLBACK_CLAIMS`)
+  - 기본값은 기존 계약 유지(tenant_id/tid, sub/user_id, role/roles[0]), fallback env를 빈 문자열로 두면 fallback 비활성화
+  - startup/auth 초기화 시 claim selector 형식 검증(`TENANT_AUTH_JWT_CLAIM_MAPPING_INVALID`)
 - [x] OAuth/OIDC 로그인 API 콜백 + 플랫폼 토큰 발급 체계 연결 (Ops MVP Phase E)
   - 신규 API:
     - `GET /api/v1/auth/jwks`

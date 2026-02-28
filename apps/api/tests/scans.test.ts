@@ -21,6 +21,12 @@ const ORIGINAL_AUTH_MODE = process.env.AUTH_MODE;
 const ORIGINAL_JWT_ISSUER = process.env.JWT_ISSUER;
 const ORIGINAL_JWT_AUDIENCE = process.env.JWT_AUDIENCE;
 const ORIGINAL_JWT_JWKS_URL = process.env.JWT_JWKS_URL;
+const ORIGINAL_JWT_TENANT_ID_CLAIM = process.env.JWT_TENANT_ID_CLAIM;
+const ORIGINAL_JWT_TENANT_ID_FALLBACK_CLAIMS = process.env.JWT_TENANT_ID_FALLBACK_CLAIMS;
+const ORIGINAL_JWT_USER_ID_CLAIM = process.env.JWT_USER_ID_CLAIM;
+const ORIGINAL_JWT_USER_ID_FALLBACK_CLAIMS = process.env.JWT_USER_ID_FALLBACK_CLAIMS;
+const ORIGINAL_JWT_ROLE_CLAIM = process.env.JWT_ROLE_CLAIM;
+const ORIGINAL_JWT_ROLE_FALLBACK_CLAIMS = process.env.JWT_ROLE_FALLBACK_CLAIMS;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -90,6 +96,12 @@ describe("Scans API", () => {
     delete process.env.JWT_ISSUER;
     delete process.env.JWT_AUDIENCE;
     delete process.env.JWT_JWKS_URL;
+    delete process.env.JWT_TENANT_ID_CLAIM;
+    delete process.env.JWT_TENANT_ID_FALLBACK_CLAIMS;
+    delete process.env.JWT_USER_ID_CLAIM;
+    delete process.env.JWT_USER_ID_FALLBACK_CLAIMS;
+    delete process.env.JWT_ROLE_CLAIM;
+    delete process.env.JWT_ROLE_FALLBACK_CLAIMS;
     vi.useRealTimers();
   });
 
@@ -102,6 +114,15 @@ describe("Scans API", () => {
     restoreEnv("JWT_ISSUER", ORIGINAL_JWT_ISSUER);
     restoreEnv("JWT_AUDIENCE", ORIGINAL_JWT_AUDIENCE);
     restoreEnv("JWT_JWKS_URL", ORIGINAL_JWT_JWKS_URL);
+    restoreEnv("JWT_TENANT_ID_CLAIM", ORIGINAL_JWT_TENANT_ID_CLAIM);
+    restoreEnv(
+      "JWT_TENANT_ID_FALLBACK_CLAIMS",
+      ORIGINAL_JWT_TENANT_ID_FALLBACK_CLAIMS
+    );
+    restoreEnv("JWT_USER_ID_CLAIM", ORIGINAL_JWT_USER_ID_CLAIM);
+    restoreEnv("JWT_USER_ID_FALLBACK_CLAIMS", ORIGINAL_JWT_USER_ID_FALLBACK_CLAIMS);
+    restoreEnv("JWT_ROLE_CLAIM", ORIGINAL_JWT_ROLE_CLAIM);
+    restoreEnv("JWT_ROLE_FALLBACK_CLAIMS", ORIGINAL_JWT_ROLE_FALLBACK_CLAIMS);
     vi.useRealTimers();
   });
 
@@ -931,6 +952,93 @@ describe("Scans API", () => {
 
       expect(getRes.statusCode).toBe(200);
       expect(getRes.json().tenantId).toBe("tenant-jwt-fallback");
+    });
+
+    it("JWT claim 매핑 env를 커스텀하면 지정한 claim 키로 tenant/user/role을 읽어야 한다", async () => {
+      process.env.JWT_TENANT_ID_CLAIM = "org_id";
+      process.env.JWT_TENANT_ID_FALLBACK_CLAIMS = "tenant_id, tid";
+      process.env.JWT_USER_ID_CLAIM = "uid";
+      process.env.JWT_USER_ID_FALLBACK_CLAIMS = "sub, user_id";
+      process.env.JWT_ROLE_CLAIM = "permissions[0]";
+      process.env.JWT_ROLE_FALLBACK_CLAIMS = "role";
+
+      const token = await issueToken({
+        claims: {
+          org_id: "tenant-jwt-custom-mapping",
+          uid: "jwt-user-custom-mapping",
+          permissions: ["owner"],
+        },
+      });
+
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+        payload: { engine: "gitleaks", repoUrl: "https://github.com/test/repo-jwt-custom" },
+      });
+
+      expect(createRes.statusCode).toBe(202);
+      const scanId = createRes.json().scanId as string;
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(getRes.statusCode).toBe(200);
+      expect(getRes.json().tenantId).toBe("tenant-jwt-custom-mapping");
+    });
+
+    it("JWT fallback env를 비우면 fallback 없이 primary claim만 사용해야 한다", async () => {
+      process.env.JWT_ROLE_CLAIM = "role";
+      process.env.JWT_ROLE_FALLBACK_CLAIMS = "";
+
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-no-role-fallback",
+          tenant_id: "tenant-jwt-no-role-fallback",
+          roles: ["admin"],
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_USER_ROLE_CLAIM_REQUIRED");
+    });
+
+    it("JWT claim 매핑 형식이 잘못되면 503을 반환해야 한다", async () => {
+      process.env.JWT_ROLE_CLAIM = "roles[";
+
+      const token = await issueToken({
+        claims: {
+          sub: "jwt-user-invalid-claim-mapping",
+          tenant_id: "tenant-jwt-invalid-claim-mapping",
+          role: "admin",
+        },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json().code).toBe("TENANT_AUTH_JWT_CLAIM_MAPPING_INVALID");
     });
 
     it("서명이 유효하지 않으면 401을 반환해야 한다", async () => {

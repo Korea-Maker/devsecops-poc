@@ -12,6 +12,7 @@ import { hydrateScanStore } from "./scanner/store.js";
 import { hydrateQueueState } from "./scanner/queue.js";
 import { hydrateOrganizationStore } from "./tenants/store.js";
 import { hydrateTenantAuditLogs } from "./tenants/audit-log.js";
+import { validateTenantAuthConfiguration } from "./tenants/auth.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -19,6 +20,17 @@ export function buildApp() {
   });
 
   app.addHook("onReady", async () => {
+    const tenantAuthValidation = validateTenantAuthConfiguration();
+    if (!tenantAuthValidation.ok) {
+      const startupError = new Error(tenantAuthValidation.error) as Error & {
+        statusCode?: number;
+        code?: string;
+      };
+      startupError.statusCode = tenantAuthValidation.statusCode;
+      startupError.code = tenantAuthValidation.code;
+      throw startupError;
+    }
+
     const initResult = await initializeDataBackend({ logger: app.log });
 
     hydrateScanStore(initResult.persistedState.scans);
