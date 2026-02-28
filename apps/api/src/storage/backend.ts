@@ -7,6 +7,7 @@ import type { TenantAuditLog } from "../tenants/audit-log.js";
 
 const DEFAULT_ORGANIZATION_NAME = "Default Organization";
 const DEFAULT_ORGANIZATION_SLUG = "default";
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export type DataBackend = "memory" | "postgres";
 
@@ -216,6 +217,33 @@ export function getActiveDataBackend(): DataBackend {
 
 export function getDatabaseUrl(): string | undefined {
   return readTrimmedEnv("DATABASE_URL");
+}
+
+function readAuditLogRetentionDays(): number | undefined {
+  const rawValue = readTrimmedEnv("TENANT_AUDIT_LOG_RETENTION_DAYS");
+  if (!rawValue) {
+    return undefined;
+  }
+
+  if (!/^\d+$/.test(rawValue)) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function getAuditLogRetentionCutoffIso(nowMs = Date.now()): string | undefined {
+  const retentionDays = readAuditLogRetentionDays();
+  if (!retentionDays) {
+    return undefined;
+  }
+
+  return new Date(nowMs - retentionDays * MILLISECONDS_PER_DAY).toISOString();
 }
 
 function defaultCreateSqlClient(connectionString: string): SqlClient {
@@ -502,6 +530,27 @@ async function recoverInterruptedRunningScans(client: SqlClient): Promise<number
   }
 
   return recoveredRunningScansResult.rows.length;
+}
+
+async function prunePersistedTenantAuditLogsOnStartup(client: SqlClient): Promise<void> {
+  const cutoffIso = getAuditLogRetentionCutoffIso();
+  if (!cutoffIso) {
+    return;
+  }
+
+  const pruneResult = await client.query(
+    `
+      DELETE FROM tenant_audit_logs
+      WHERE created_at < $1
+    `,
+    [cutoffIso]
+  );
+
+  info(
+    "[storage] tenant audit log retention prune 적용 (deleted=%d, cutoff=%s)",
+    pruneResult.rowCount ?? 0,
+    cutoffIso
+  );
 }
 
 function toObjectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -799,6 +848,7 @@ export async function initializeDataBackend(
     try {
       candidateClient = createSqlClient(databaseUrl);
       await applySchemaMigrations(candidateClient);
+      await prunePersistedTenantAuditLogsOnStartup(candidateClient);
       const recoveredRunningScans = await recoverInterruptedRunningScans(candidateClient);
       const persistedState = await readPersistedState(candidateClient);
 
@@ -880,6 +930,31 @@ function schedulePersistenceTask(
     });
 }
 
+async function runInTransaction(
+  client: SqlClient,
+  transactionName: string,
+  task: () => Promise<void>
+): Promise<void> {
+  await client.query("BEGIN");
+
+  try {
+    await task();
+    await client.query("COMMIT");
+  } catch (transactionError) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      warn(
+        "[storage] postgres transaction rollback 실패 (%s): %s",
+        transactionName,
+        toErrorMessage(rollbackError)
+      );
+    }
+
+    throw transactionError;
+  }
+}
+
 export function persistScanRecord(record: ScanRecord): void {
   schedulePersistenceTask("persistScanRecord", async (client) => {
     await client.query(
@@ -956,47 +1031,51 @@ export function persistQueueState(state: PersistedQueueState): void {
   const snapshotPendingRetries = state.pendingRetries.map((item) => ({ ...item }));
 
   schedulePersistenceTask("persistQueueState", async (client) => {
-    await client.query("DELETE FROM scan_queue_jobs");
-    await client.query("DELETE FROM scan_dead_letters");
-    await client.query("DELETE FROM scan_retry_schedules");
+    await runInTransaction(client, "persistQueueState", async () => {
+      await client.query("DELETE FROM scan_queue_jobs");
+      await client.query("DELETE FROM scan_dead_letters");
+      await client.query("DELETE FROM scan_retry_schedules");
 
-    for (const scanId of snapshotQueuedScanIds) {
-      await client.query(
-        `
-          INSERT INTO scan_queue_jobs (scan_id)
-          VALUES ($1)
-        `,
-        [scanId]
-      );
-    }
+      for (const scanId of snapshotQueuedScanIds) {
+        await client.query(
+          `
+            INSERT INTO scan_queue_jobs (scan_id)
+            VALUES ($1)
+          `,
+          [scanId]
+        );
+      }
 
-    for (const item of snapshotDeadLetters) {
-      await client.query(
-        `
-          INSERT INTO scan_dead_letters (scan_id, retry_count, error, code, failed_at)
-          VALUES ($1, $2, $3, $4, $5)
-        `,
-        [item.scanId, item.retryCount, item.error, item.code ?? null, item.failedAt]
-      );
-    }
+      for (const item of snapshotDeadLetters) {
+        await client.query(
+          `
+            INSERT INTO scan_dead_letters (scan_id, retry_count, error, code, failed_at)
+            VALUES ($1, $2, $3, $4, $5)
+          `,
+          [item.scanId, item.retryCount, item.error, item.code ?? null, item.failedAt]
+        );
+      }
 
-    for (const item of snapshotPendingRetries) {
-      await client.query(
-        `
-          INSERT INTO scan_retry_schedules (scan_id, due_at)
-          VALUES ($1, $2)
-        `,
-        [item.scanId, item.dueAt]
-      );
-    }
+      for (const item of snapshotPendingRetries) {
+        await client.query(
+          `
+            INSERT INTO scan_retry_schedules (scan_id, due_at)
+            VALUES ($1, $2)
+          `,
+          [item.scanId, item.dueAt]
+        );
+      }
+    });
   });
 }
 
 export function clearPersistedQueueState(): void {
   schedulePersistenceTask("clearPersistedQueueState", async (client) => {
-    await client.query("DELETE FROM scan_queue_jobs");
-    await client.query("DELETE FROM scan_dead_letters");
-    await client.query("DELETE FROM scan_retry_schedules");
+    await runInTransaction(client, "clearPersistedQueueState", async () => {
+      await client.query("DELETE FROM scan_queue_jobs");
+      await client.query("DELETE FROM scan_dead_letters");
+      await client.query("DELETE FROM scan_retry_schedules");
+    });
   });
 }
 
@@ -1172,6 +1251,25 @@ export function persistTenantAuditLog(log: TenantAuditLog): void {
         log.details ? JSON.stringify(log.details) : null,
         log.createdAt,
       ]
+    );
+  });
+}
+
+export function prunePersistedTenantAuditLogs(cutoffIso: string): void {
+  const cutoffMs = Date.parse(cutoffIso);
+  if (Number.isNaN(cutoffMs)) {
+    return;
+  }
+
+  const normalizedCutoffIso = new Date(cutoffMs).toISOString();
+
+  schedulePersistenceTask("prunePersistedTenantAuditLogs", async (client) => {
+    await client.query(
+      `
+        DELETE FROM tenant_audit_logs
+        WHERE created_at < $1
+      `,
+      [normalizedCutoffIso]
     );
   });
 }

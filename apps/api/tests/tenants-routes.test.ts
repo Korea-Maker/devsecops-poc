@@ -9,6 +9,8 @@ const ORIGINAL_AUTH_MODE = process.env.AUTH_MODE;
 const ORIGINAL_JWT_ISSUER = process.env.JWT_ISSUER;
 const ORIGINAL_JWT_AUDIENCE = process.env.JWT_AUDIENCE;
 const ORIGINAL_JWT_JWKS_URL = process.env.JWT_JWKS_URL;
+const ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS =
+  process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -54,6 +56,7 @@ describe("Tenant API", () => {
     delete process.env.JWT_ISSUER;
     delete process.env.JWT_AUDIENCE;
     delete process.env.JWT_JWKS_URL;
+    delete process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
   });
 
   afterEach(() => {
@@ -62,6 +65,10 @@ describe("Tenant API", () => {
     restoreEnv("JWT_ISSUER", ORIGINAL_JWT_ISSUER);
     restoreEnv("JWT_AUDIENCE", ORIGINAL_JWT_AUDIENCE);
     restoreEnv("JWT_JWKS_URL", ORIGINAL_JWT_JWKS_URL);
+    restoreEnv(
+      "TENANT_AUDIT_LOG_RETENTION_DAYS",
+      ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS
+    );
     clearOrganizationStore();
     clearTenantAuditLogs();
   });
@@ -416,6 +423,148 @@ describe("Tenant API", () => {
 
     expect(invalidLimitRes.statusCode).toBe(400);
     expect(invalidLimitRes.json().code).toBe("TENANT_INVALID_LIMIT");
+  });
+
+  it("required 모드에서 감사 로그는 action/userId/time window 필터를 지원해야 한다", async () => {
+    process.env.TENANT_AUTH_MODE = "required";
+
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/organizations",
+      headers: buildTenantHeaders({
+        tenantId: "default",
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+      payload: {
+        name: "Audit Filter Org",
+        slug: "audit-filter-org",
+      },
+    });
+    const orgId = createRes.json().organization.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/organizations/${orgId}/memberships`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+      payload: {
+        userId: "audit-member-2",
+        role: "member",
+      },
+    });
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/v1/organizations/${orgId}/memberships/audit-member-2`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+      payload: {
+        role: "viewer",
+      },
+    });
+
+    const filteredRes = await app.inject({
+      method: "GET",
+      url:
+        `/api/v1/organizations/${orgId}/audit-logs` +
+        "?action=membership.created" +
+        "&userId=audit-member-2" +
+        "&since=2000-01-01T00:00:00.000Z" +
+        "&until=2100-01-01T00:00:00.000Z",
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(filteredRes.statusCode).toBe(200);
+    const filteredLogs = filteredRes.json();
+    expect(filteredLogs.length).toBeGreaterThanOrEqual(1);
+    expect(
+      filteredLogs.every((log: { action: string }) => log.action === "membership.created")
+    ).toBe(true);
+    expect(
+      filteredLogs.every(
+        (log: { actorUserId?: string; targetUserId?: string }) =>
+          log.actorUserId === "audit-member-2" || log.targetUserId === "audit-member-2"
+      )
+    ).toBe(true);
+
+    const futureWindowRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs?since=2999-01-01T00:00:00.000Z`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(futureWindowRes.statusCode).toBe(200);
+    expect(futureWindowRes.json()).toEqual([]);
+
+    const invalidActionRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs?action=unknown.action`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(invalidActionRes.statusCode).toBe(400);
+    expect(invalidActionRes.json().code).toBe("TENANT_INVALID_AUDIT_ACTION");
+
+    const invalidUserIdRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs?userId=%20`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(invalidUserIdRes.statusCode).toBe(400);
+    expect(invalidUserIdRes.json().code).toBe("TENANT_INVALID_AUDIT_USER_ID");
+
+    const invalidTimeRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/organizations/${orgId}/audit-logs?since=not-a-date`,
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(invalidTimeRes.statusCode).toBe(400);
+    expect(invalidTimeRes.json().code).toBe("TENANT_INVALID_AUDIT_TIME");
+
+    const invalidRangeRes = await app.inject({
+      method: "GET",
+      url:
+        `/api/v1/organizations/${orgId}/audit-logs` +
+        "?since=2026-03-02T00:00:00.000Z" +
+        "&until=2026-03-01T00:00:00.000Z",
+      headers: buildTenantHeaders({
+        tenantId: orgId,
+        userId: "audit-filter-admin",
+        role: "admin",
+      }),
+    });
+
+    expect(invalidRangeRes.statusCode).toBe(400);
+    expect(invalidRangeRes.json().code).toBe("TENANT_INVALID_AUDIT_TIME_RANGE");
   });
 
   it("required 모드에서 member는 멤버십/감사로그 관리 API 접근이 거부되어야 한다", async () => {

@@ -150,8 +150,10 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - tenant audit logs
 - 서버 시작 시 경량 migration 버저닝(`schema_migrations`)을 기준으로 schema를 순차/멱등 적용
 - 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/retry schedule/org/membership/invite token/audit log)를 hydrate
+- queue/dead-letter/retry snapshot 저장은 단일 PostgreSQL transaction(`BEGIN/COMMIT`)으로 수행되어 교체 중간 상태 노출을 방지
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
 - 비정상 종료 시 retry timer 대기 작업은 startup recovery에서 즉시 재적재 또는 남은 backoff로 재타이머링
+- `TENANT_AUDIT_LOG_RETENTION_DAYS`가 설정되면 startup 시점에 오래된 tenant audit log를 선제 prune 후 hydrate
 
 주요 스캔/테넌트 환경변수:
 
@@ -162,6 +164,7 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
 - `TENANT_AUTH_MODE`: `disabled | required` (기본값 `disabled`)
 - `AUTH_MODE`: `header | jwt` (기본값 `header`, `TENANT_AUTH_MODE=required`일 때 적용)
+- `TENANT_AUDIT_LOG_RETENTION_DAYS`: tenant 감사 로그 보존 기간(일). 미설정/0/음수/비정수면 비활성화(하위호환)
 - `JWT_ISSUER`: JWT issuer (`AUTH_MODE=jwt`에서 필수)
 - `JWT_AUDIENCE`: JWT audience (`AUTH_MODE=jwt`에서 필수)
 - `JWT_JWKS_URL`: JWT JWKS endpoint (`AUTH_MODE=jwt`에서 필수, http/https)
@@ -210,8 +213,11 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - body: `{ token, email?, userId? }`
   - `TENANT_AUTH_MODE=required`에서는 `x-tenant-id` scope와 토큰 organization이 일치해야 하며, userId는 인증 컨텍스트를 우선 사용
   - 토큰은 1회용(replay 방지), 만료 토큰은 `410 TENANT_INVITE_EXPIRED`
-- `GET /api/v1/organizations/:id/audit-logs?limit=50` → 조직 감사 로그 조회 (`admin` 이상)
-  - `limit`은 1~100 정수
+- `GET /api/v1/organizations/:id/audit-logs?limit=50&action=<...>&userId=<...>&since=<iso>&until=<iso>` → 조직 감사 로그 조회 (`admin` 이상)
+  - `limit`: 1~100 정수(기본 50)
+  - `action`: `organization.created | membership.created | membership.role_updated | membership.deleted`
+  - `userId`: `actorUserId` 또는 `targetUserId`가 일치하는 로그만 반환
+  - `since` / `until`: ISO8601 시간창 필터(`since <= until`)
 
 비활성화된 조직에서는 멤버십 변경/초대 토큰 생성/수락 같은 쓰기 작업이 `409 TENANT_ORG_DISABLED`로 차단된다.
 오류 응답 shape는 scans API와 동일하게 `{ error, code? }`를 사용한다.
@@ -303,7 +309,7 @@ pnpm --filter @devsecops/web build
 
 ## 현재 제약 사항
 
-- **크래시 타이밍 경계**: retry schedule 복구는 지원되지만, persistence는 snapshot 재기록 방식이라 프로세스 강제 종료 타이밍에 마지막 수 ms 상태가 유실될 수 있음(운영상 정기 graceful shutdown 권장)
+- **감사 로그 보존정책 기본값 비활성화**: 하위호환을 위해 `TENANT_AUDIT_LOG_RETENTION_DAYS`를 설정하지 않으면 감사 로그는 자동 삭제되지 않음
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)

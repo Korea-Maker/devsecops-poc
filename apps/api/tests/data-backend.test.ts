@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getActiveDataBackend,
   getConfiguredDataBackend,
@@ -11,6 +11,8 @@ import {
 
 const ORIGINAL_DATA_BACKEND = process.env.DATA_BACKEND;
 const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
+const ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS =
+  process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -53,9 +55,17 @@ function createMockSqlClient(
   };
 }
 
+beforeEach(() => {
+  delete process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
+});
+
 afterEach(async () => {
   restoreEnv("DATA_BACKEND", ORIGINAL_DATA_BACKEND);
   restoreEnv("DATABASE_URL", ORIGINAL_DATABASE_URL);
+  restoreEnv(
+    "TENANT_AUDIT_LOG_RETENTION_DAYS",
+    ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS
+  );
   await resetDataBackendForTests();
 });
 
@@ -289,7 +299,7 @@ describe("data backend config", () => {
     });
   });
 
-  it("persistQueueState는 postgres 모드에서 queue/dead-letter/retry 스냅샷을 저장해야 한다", async () => {
+  it("persistQueueState는 postgres 모드에서 단일 transaction으로 queue/dead-letter/retry 스냅샷을 저장해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
     process.env.DATABASE_URL = "postgresql://example/devsecops";
 
@@ -321,12 +331,31 @@ describe("data backend config", () => {
 
     await resetDataBackendForTests();
 
-    const statements = mock.query.mock.calls.map(([sql]) => String(sql));
-    expect(statements.some((sql) => sql.includes("DELETE FROM scan_queue_jobs"))).toBe(true);
-    expect(statements.some((sql) => sql.includes("DELETE FROM scan_dead_letters"))).toBe(true);
-    expect(statements.some((sql) => sql.includes("DELETE FROM scan_retry_schedules"))).toBe(
-      true
+    const normalizedStatements = mock.query.mock.calls.map(([sql]) =>
+      String(sql).replace(/\s+/g, " ").trim()
     );
+
+    const beginIndex = normalizedStatements.findIndex((statement) => statement === "BEGIN");
+    const commitIndex = normalizedStatements.findIndex((statement) => statement === "COMMIT");
+
+    expect(beginIndex).toBeGreaterThanOrEqual(0);
+    expect(commitIndex).toBeGreaterThan(beginIndex);
+    expect(normalizedStatements.includes("ROLLBACK")).toBe(false);
+
+    const queueDeleteIndex = normalizedStatements.findIndex((statement) =>
+      statement.includes("DELETE FROM scan_queue_jobs")
+    );
+    const deadLetterDeleteIndex = normalizedStatements.findIndex((statement) =>
+      statement.includes("DELETE FROM scan_dead_letters")
+    );
+    const retryDeleteIndex = normalizedStatements.findIndex((statement) =>
+      statement.includes("DELETE FROM scan_retry_schedules")
+    );
+
+    expect(queueDeleteIndex).toBeGreaterThan(beginIndex);
+    expect(deadLetterDeleteIndex).toBeGreaterThan(beginIndex);
+    expect(retryDeleteIndex).toBeGreaterThan(beginIndex);
+    expect(commitIndex).toBeGreaterThan(retryDeleteIndex);
 
     const queueInsertValues = mock.query.mock.calls
       .filter(([sql]) => String(sql).includes("INSERT INTO scan_queue_jobs"))
@@ -350,6 +379,109 @@ describe("data backend config", () => {
       .filter(([sql]) => String(sql).includes("INSERT INTO scan_retry_schedules"))
       .map(([, values]) => values);
     expect(retryInsertValues).toEqual([["scan-retry-a", "2026-03-01T00:20:00.000Z"]]);
+  });
+
+  it("persistQueueState는 snapshot 저장 중 오류가 나면 transaction을 rollback 해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+
+    const mock = createMockSqlClient((sql) => {
+      if (sql.includes("INSERT INTO scan_dead_letters")) {
+        throw new Error("dead-letter write failed");
+      }
+
+      return [];
+    });
+
+    await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    persistQueueState({
+      queuedScanIds: ["scan-a"],
+      deadLetters: [
+        {
+          scanId: "scan-failed-a",
+          retryCount: 1,
+          error: "fail",
+          code: "SCAN_EXECUTION_FAILED",
+          failedAt: "2026-03-01T00:00:00.000Z",
+        },
+      ],
+      pendingRetries: [],
+    });
+
+    await resetDataBackendForTests();
+
+    const normalizedStatements = mock.query.mock.calls.map(([sql]) =>
+      String(sql).replace(/\s+/g, " ").trim()
+    );
+
+    expect(normalizedStatements.includes("BEGIN")).toBe(true);
+    expect(normalizedStatements.includes("ROLLBACK")).toBe(true);
+    expect(normalizedStatements.includes("COMMIT")).toBe(false);
+  });
+
+  it("TENANT_AUDIT_LOG_RETENTION_DAYS가 설정되면 초기화 시 오래된 감사 로그를 prune 해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_AUDIT_LOG_RETENTION_DAYS = "7";
+
+    const auditRows = [
+      {
+        id: "audit-old",
+        organization_id: "org-a",
+        actor_user_id: "old-user",
+        action: "membership.created",
+        target_user_id: "target-old",
+        details: null,
+        created_at: "2026-02-01T00:00:00.000Z",
+      },
+      {
+        id: "audit-new",
+        organization_id: "org-a",
+        actor_user_id: "new-user",
+        action: "membership.role_updated",
+        target_user_id: "target-new",
+        details: null,
+        created_at: "2026-03-01T00:00:00.000Z",
+      },
+    ];
+
+    const mock = createMockSqlClient((sql, values) => {
+      if (sql.includes("DELETE FROM tenant_audit_logs") && Array.isArray(values)) {
+        const cutoff = String(values[0] ?? "");
+        for (let index = auditRows.length - 1; index >= 0; index -= 1) {
+          const row = auditRows[index];
+          if (row && row.created_at < cutoff) {
+            auditRows.splice(index, 1);
+          }
+        }
+        return [];
+      }
+
+      if (sql.includes("FROM tenant_audit_logs")) {
+        return [...auditRows];
+      }
+
+      return [];
+    });
+
+    const result = await initializeDataBackend({
+      logger: silentLogger,
+      createSqlClient: () => mock.client,
+    });
+
+    expect(result.activeBackend).toBe("postgres");
+    expect(result.persistedState.tenantAuditLogs).toHaveLength(1);
+    expect(result.persistedState.tenantAuditLogs[0]?.id).toBe("audit-new");
+
+    const pruneCalls = mock.query.mock.calls.filter(([sql]) =>
+      String(sql).includes("DELETE FROM tenant_audit_logs")
+    );
+    expect(pruneCalls).toHaveLength(1);
+    expect(pruneCalls[0]?.[1]).toHaveLength(1);
   });
 
   it("postgres 초기화 시 organization invite token 상태를 hydrate 해야 한다", async () => {

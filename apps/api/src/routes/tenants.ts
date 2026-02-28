@@ -13,8 +13,10 @@ import {
 } from "../tenants/store.js";
 import {
   createTenantAuditLog,
+  isTenantAuditAction,
   listTenantAuditLogs,
 } from "../tenants/audit-log.js";
+import type { TenantAuditAction } from "../tenants/audit-log.js";
 import {
   getTenantAuthMode,
   requireMinimumRole,
@@ -68,6 +70,27 @@ interface ParsedOptionalTextFailure {
 }
 
 type ParsedOptionalTextResult = ParsedOptionalTextSuccess | ParsedOptionalTextFailure;
+
+interface AuditLogQueryOptions {
+  limit: number;
+  action?: TenantAuditAction;
+  userId?: string;
+  since?: string;
+  until?: string;
+}
+
+interface ParsedAuditLogQuerySuccess {
+  ok: true;
+  options: AuditLogQueryOptions;
+}
+
+interface ParsedAuditLogQueryFailure {
+  ok: false;
+  error: string;
+  code: string;
+}
+
+type ParsedAuditLogQueryResult = ParsedAuditLogQuerySuccess | ParsedAuditLogQueryFailure;
 
 function sendError(
   reply: FastifyReply,
@@ -183,6 +206,126 @@ function parseAuditLimit(rawLimit: unknown): number | null {
   }
 
   return parsed;
+}
+
+function parseOptionalAuditTimestamp(rawValue: unknown): string | null | undefined {
+  if (rawValue === undefined) {
+    return undefined;
+  }
+
+  if (typeof rawValue !== "string") {
+    return null;
+  }
+
+  const normalized = rawValue.trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const parsedMs = Date.parse(normalized);
+  if (Number.isNaN(parsedMs)) {
+    return null;
+  }
+
+  return new Date(parsedMs).toISOString();
+}
+
+function parseAuditLogQuery(query: {
+  limit?: unknown;
+  action?: unknown;
+  userId?: unknown;
+  since?: unknown;
+  until?: unknown;
+}): ParsedAuditLogQueryResult {
+  const limit = parseAuditLimit(query.limit);
+  if (limit === null) {
+    return {
+      ok: false,
+      error: "limit은 1~100 범위의 정수여야 합니다",
+      code: "TENANT_INVALID_LIMIT",
+    };
+  }
+
+  let action: TenantAuditAction | undefined;
+  if (query.action !== undefined) {
+    if (typeof query.action !== "string") {
+      return {
+        ok: false,
+        error: "action은 문자열이어야 합니다",
+        code: "TENANT_INVALID_AUDIT_ACTION",
+      };
+    }
+
+    const normalizedAction = query.action.trim();
+    if (!isTenantAuditAction(normalizedAction)) {
+      return {
+        ok: false,
+        error: "지원하지 않는 action입니다",
+        code: "TENANT_INVALID_AUDIT_ACTION",
+      };
+    }
+
+    action = normalizedAction;
+  }
+
+  let userId: string | undefined;
+  if (query.userId !== undefined) {
+    if (typeof query.userId !== "string") {
+      return {
+        ok: false,
+        error: "userId는 문자열이어야 합니다",
+        code: "TENANT_INVALID_AUDIT_USER_ID",
+      };
+    }
+
+    const normalizedUserId = query.userId.trim();
+    if (normalizedUserId.length === 0) {
+      return {
+        ok: false,
+        error: "userId는 비어 있을 수 없습니다",
+        code: "TENANT_INVALID_AUDIT_USER_ID",
+      };
+    }
+
+    userId = normalizedUserId;
+  }
+
+  const since = parseOptionalAuditTimestamp(query.since);
+  if (since === null) {
+    return {
+      ok: false,
+      error: "since는 유효한 날짜/시간 문자열이어야 합니다",
+      code: "TENANT_INVALID_AUDIT_TIME",
+    };
+  }
+
+  const until = parseOptionalAuditTimestamp(query.until);
+  if (until === null) {
+    return {
+      ok: false,
+      error: "until은 유효한 날짜/시간 문자열이어야 합니다",
+      code: "TENANT_INVALID_AUDIT_TIME",
+    };
+  }
+
+  if (since && until && Date.parse(since) > Date.parse(until)) {
+    return {
+      ok: false,
+      error: "since는 until보다 클 수 없습니다",
+      code: "TENANT_INVALID_AUDIT_TIME_RANGE",
+    };
+  }
+
+  return {
+    ok: true,
+    options: {
+      limit,
+      action,
+      userId,
+      since,
+      until,
+    },
+  };
 }
 
 function parseIntegerQuery(
@@ -830,7 +973,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   /** GET /api/v1/organizations/:id/audit-logs — 조직 감사 로그 조회 */
   app.get<{
     Params: { id: string };
-    Querystring: { limit?: string };
+    Querystring: {
+      limit?: string;
+      action?: string;
+      userId?: string;
+      since?: string;
+      until?: string;
+    };
   }>("/api/v1/organizations/:id/audit-logs", async (request, reply) => {
     if (!requireMinimumRole(request, reply, "admin")) {
       return;
@@ -846,19 +995,14 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
-    const limit = parseAuditLimit(request.query.limit);
-    if (limit === null) {
-      return sendError(
-        reply,
-        400,
-        "limit은 1~100 범위의 정수여야 합니다",
-        "TENANT_INVALID_LIMIT"
-      );
+    const parsedAuditQuery = parseAuditLogQuery(request.query);
+    if (!parsedAuditQuery.ok) {
+      return sendError(reply, 400, parsedAuditQuery.error, parsedAuditQuery.code);
     }
 
     const logs = listTenantAuditLogs({
       organizationId: request.params.id,
-      limit,
+      ...parsedAuditQuery.options,
     });
     return reply.status(200).send(logs);
   });

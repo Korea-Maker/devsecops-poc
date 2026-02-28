@@ -68,6 +68,12 @@
   - `GET /api/v1/organizations/:id/audit-logs?limit=50`
   - 조직 생성/멤버 생성/권한변경/멤버삭제 이벤트 적재
 
+- [x] Ops MVP Phase H 운영 신뢰성 보강
+  - queue/dead-letter/retry snapshot 저장을 PostgreSQL 단일 transaction(`BEGIN/COMMIT`)으로 고도화
+  - 감사 로그 조회 필터 확장(`action`, `userId`, `since`, `until`) + 기존 `limit` 계약 하위호환 유지
+  - `TENANT_AUDIT_LOG_RETENTION_DAYS` 보존 정책 추가 + startup/write 시점 lightweight prune
+  - 관련 테스트 보강(data backend transaction 시퀀스, audit log route/store 필터/retention)
+
 - [x] 데이터 저장 백엔드 추상화 + PostgreSQL 영속화 (Ops MVP)
   - 신규 환경변수: `DATA_BACKEND=memory|postgres` (기본 `memory`)
   - `DATA_BACKEND=postgres`에서 `DATABASE_URL` 기반 연결/초기화
@@ -114,9 +120,9 @@
   - membership 매핑: `sub` 우선 + `email` fallback, 복수 membership 시 `tenantId` 필수
   - 플랫폼 JWT: RS256 + JWKS(`kid`) 노출, env 키 우선/미설정 시 ephemeral 키 생성 경고
 - [x] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
-- [ ] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
+- [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [ ] tenant 인덱싱/행 수준 격리(RLS) 설계
-- [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화
+- [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
 - [ ] SaaS 인프라(IaC) 및 staging/prod 배포 파이프라인 고도화
 
 ---
