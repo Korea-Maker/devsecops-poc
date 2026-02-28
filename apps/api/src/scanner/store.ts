@@ -5,6 +5,7 @@ import type {
   ScanResultSummary,
   ScanStatus,
 } from "./types.js";
+import { DEFAULT_TENANT_ID } from "../tenants/types.js";
 
 export type ScanFindingsSummary = Pick<
   ScanResultSummary,
@@ -14,6 +15,8 @@ export type ScanFindingsSummary = Pick<
 /** 스캔 레코드 인터페이스 */
 export interface ScanRecord {
   id: string;
+  /** 소속 테넌트(조직) ID */
+  tenantId: string;
   engine: ScanEngineType;
   repoUrl: string;
   branch: string;
@@ -34,6 +37,8 @@ interface CreateScanParams {
   engine: ScanEngineType;
   repoUrl: string;
   branch: string;
+  /** 소속 테넌트 ID (미전달 시 DEFAULT_TENANT_ID 적용) */
+  tenantId?: string;
 }
 
 /**
@@ -41,8 +46,14 @@ interface CreateScanParams {
  */
 export function createScan(params: CreateScanParams): ScanRecord {
   const id = randomUUID();
+  const normalizedTenantId = params.tenantId?.trim();
+
   const record: ScanRecord = {
     id,
+    tenantId:
+      normalizedTenantId && normalizedTenantId.length > 0
+        ? normalizedTenantId
+        : DEFAULT_TENANT_ID,
     engine: params.engine,
     repoUrl: params.repoUrl,
     branch: params.branch,
@@ -64,15 +75,20 @@ export function getScan(id: string): ScanRecord | undefined {
 /** listScans 필터 옵션 */
 interface ListScansFilter {
   status?: ScanStatus;
+  /** 테넌트 ID 필터 (미전달 시 전체 반환) */
+  tenantId?: string;
 }
 
 /**
- * 전체 스캔 목록을 반환합니다. status 필터가 주어지면 해당 상태만 반환합니다.
+ * 전체 스캔 목록을 반환합니다. 필터가 주어지면 해당 조건만 반환합니다.
  */
 export function listScans(filter?: ListScansFilter): ScanRecord[] {
-  const all = Array.from(scanStore.values());
+  let all = Array.from(scanStore.values());
+  if (filter?.tenantId) {
+    all = all.filter((r) => r.tenantId === filter.tenantId);
+  }
   if (filter?.status) {
-    return all.filter((r) => r.status === filter.status);
+    all = all.filter((r) => r.status === filter.status);
   }
   return all;
 }

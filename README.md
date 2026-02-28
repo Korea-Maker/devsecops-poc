@@ -47,20 +47,26 @@
 
 ---
 
-## 현재 구현 상태 (Phase 2-4 기준)
+## 현재 구현 상태 (Phase 2-5 기준)
 
 ### API (`apps/api`)
 
 - `GET /health` → `{ ok: true, service: "api" }`
 - `POST /api/v1/scans` → 스캔 요청 생성 + 큐 적재 (`202 Accepted`)
   - `repoUrl` 입력 계약: 로컬 디렉터리 경로 또는 `http/https/ssh/file://`, `git@...` 형식 허용 (`ftp://` 등 미지원 스킴/빈 문자열은 거부)
+  - 멀티테넌시 활성화 시 요청 tenant context(`x-tenant-id`)를 스캔 레코드에 저장
 - `GET /api/v1/scans` → 스캔 목록 조회 (`status` 필터 지원)
+  - 항상 요청 tenant 범위 내 스캔만 반환
 - `GET /api/v1/scans/:id` → 단일 스캔 상태 조회 (완료 시 `findings` 요약 포함)
+  - 다른 tenant 스캔이면 `404 SCAN_NOT_FOUND` 반환
   - 실패/재시도 상태에서는 `lastError`, `lastErrorCode` 확인 가능
 - `GET /api/v1/scans/dead-letters` → dead-letter 목록 조회
+  - `TENANT_AUTH_MODE=required`에서 `admin` 이상 권한 필요 + tenant 범위만 반환
 - `POST /api/v1/scans/:id/redrive` → dead-letter 재처리 요청
+  - `TENANT_AUTH_MODE=required`에서 `admin` 이상 권한 필요
 - `GET /api/v1/scans/queue/status` → 큐 운영 상태 조회
   - 응답: `{ queuedJobs, deadLetters, pendingRetryTimers, workerRunning, processing }`
+  - `TENANT_AUTH_MODE=required`에서 `admin` 이상 권한 필요 + tenant 필터 적용
 - `POST /api/v1/scans/queue/process-next` → 워커와 별개로 즉시 다음 작업 1건 처리
   - 응답: `{ processed: boolean, busy: boolean }`
     - `processed=false, busy=false`: 처리할 작업 없음(empty)
@@ -70,6 +76,16 @@
 
 - 공통 shape: `{ error: string, code?: string }`
 - 예: `SCAN_INVALID_ENGINE`, `SCAN_INVALID_REPO_URL`, `SCAN_NOT_FOUND`, `DEAD_LETTER_NOT_FOUND`
+
+멀티테넌시/헤더 기반 인증(`TENANT_AUTH_MODE`) 계약:
+
+- 기본값: `disabled` (기존 동작 유지, 기본 tenant=`default`)
+- `required` 모드: 아래 헤더를 검사해 요청별 tenant/user context를 구성
+  - `x-tenant-id` (선택, 미전달 시 `default` 사용)
+  - `x-user-id` (필수)
+  - `x-user-role` (필수, `owner | admin | member | viewer`)
+- `required` 모드에서 누락/형식 오류 시 4xx + `{ error, code }` 반환
+- queue/dead-letter 관리 API는 `admin` 이상(role hierarchy: `owner > admin > member > viewer`)만 접근 가능
 
 스캔 워커 동작:
 
@@ -82,11 +98,12 @@
 - 실패 처리: retry + exponential backoff + dead-letter 지원
 - 워커 중지 정책: `stopScanWorker()` 호출 시 pending retry timer를 모두 취소해 stop 이후 예기치 않은 재enqueue를 방지
 
-주요 스캔 환경변수:
+주요 스캔/테넌트 환경변수:
 
 - `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
 - `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
+- `TENANT_AUTH_MODE`: `disabled | required` (기본값 `disabled`)
 
 ### 운영/관리 API 사용 예시
 
@@ -187,7 +204,7 @@ pnpm --filter @devsecops/web build
 
 - **인메모리 스토어**: API 서버 재시작 시 모든 스캔 데이터 소실 (PostgreSQL 연동 예정)
 - **Mock 모드 기본**: `SCAN_EXECUTION_MODE=mock`이 기본값 — 실제 스캐너가 아닌 deterministic 더미 데이터 반환
-- **인증 미구현**: Google SSO 미구현 — 대시보드에 누구나 접근 가능
+- **인증 제한**: API는 헤더 기반 tenant/RBAC(`TENANT_AUTH_MODE=required`)만 지원, Google SSO/세션 인증은 미구현
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체
@@ -199,4 +216,5 @@ pnpm --filter @devsecops/web build
 - `docs/workflow/DECISIONS.md`: 확정 의사결정 / 미결정 / 리스크
 - `docs/workflow/PHASE3_BACKLOG.md`: Phase 3 대시보드/리포팅 구현 기록
 - `docs/workflow/PHASE4_BACKLOG.md`: Phase 4 GitHub CI/CD 연동 구현 기록
+- `docs/workflow/PHASE5_BACKLOG.md`: Phase 5 멀티테넌시/인증 기반 구현 기록
 - `CLAUDE.md`: 프로젝트 작업 규칙 및 검증 루틴

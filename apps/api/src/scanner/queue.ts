@@ -26,6 +26,10 @@ interface DeadLetterItem {
 export type RedriveDeadLetterResult = "accepted" | "not_found" | "orphaned_scan";
 export type ScanRuntimeErrorCode = ScanErrorCode;
 
+interface QueueTenantFilter {
+  tenantId?: string;
+}
+
 interface ScanRuntimeErrorInfo {
   code: ScanRuntimeErrorCode;
   message: string;
@@ -46,7 +50,8 @@ export interface ProcessNextScanJobResult {
 
 let workerTimer: NodeJS.Timeout | null = null;
 let isProcessing = false;
-const retryTimers = new Set<NodeJS.Timeout>();
+let processingScanId: string | null = null;
+const retryTimers = new Map<NodeJS.Timeout, string>();
 
 // 테스트에서 특정 scanId를 의도적으로 n회 실패시키기 위한 주입 훅
 const forcedFailureByScanId = new Map<string, number>();
@@ -118,6 +123,15 @@ function removeDeadLetterIndexes(indexes: number[]): void {
   }
 }
 
+function matchesTenantFilter(scanId: string, filter?: QueueTenantFilter): boolean {
+  if (!filter?.tenantId) {
+    return true;
+  }
+
+  const scan = getScan(scanId);
+  return scan?.tenantId === filter.tenantId;
+}
+
 /**
  * 스캔 작업을 큐에 추가합니다.
  */
@@ -135,31 +149,48 @@ export function getQueueSize(): number {
 /**
  * 현재 dead-letter 큐 길이를 반환합니다.
  */
-export function getDeadLetterSize(): number {
-  return deadLetterQueue.length;
+export function getDeadLetterSize(filter?: QueueTenantFilter): number {
+  if (!filter?.tenantId) {
+    return deadLetterQueue.length;
+  }
+
+  return deadLetterQueue.filter((item) => matchesTenantFilter(item.scanId, filter)).length;
 }
 
 /**
  * dead-letter 항목 목록을 반환합니다.
  */
-export function listDeadLetters(): DeadLetterItem[] {
-  return [...deadLetterQueue];
+export function listDeadLetters(filter?: QueueTenantFilter): DeadLetterItem[] {
+  const source = filter?.tenantId
+    ? deadLetterQueue.filter((item) => matchesTenantFilter(item.scanId, filter))
+    : deadLetterQueue;
+
+  return source.map((item) => ({ ...item }));
 }
 
 /**
  * dead-letter 항목을 재처리 큐에 다시 올립니다.
  * - dead-letter가 없으면 `not_found`를 반환합니다.
- * - dead-letter는 있지만 store에 scan 레코드가 없으면 `orphaned_scan`을 반환하고 dead-letter는 유지합니다.
+ * - tenant 필터가 전달되면 해당 tenant의 scan만 재처리할 수 있습니다(불일치 시 `not_found`).
+ * - tenant 필터가 없고 store에 scan 레코드가 없으면 `orphaned_scan`을 반환합니다.
  * - 성공 시(`accepted`)에만 dead-letter 제거 + queued 전이 + enqueue를 수행합니다.
  */
-export function redriveDeadLetter(scanId: string): RedriveDeadLetterResult {
+export function redriveDeadLetter(
+  scanId: string,
+  filter?: QueueTenantFilter
+): RedriveDeadLetterResult {
   const deadLetterIndexes = findDeadLetterIndexes(scanId);
   if (deadLetterIndexes.length === 0) {
     return "not_found";
   }
 
-  if (!getScan(scanId)) {
-    return "orphaned_scan";
+  const scan = getScan(scanId);
+  if (!scan) {
+    return filter?.tenantId ? "not_found" : "orphaned_scan";
+  }
+
+  if (filter?.tenantId && scan.tenantId !== filter.tenantId) {
+    return "not_found";
   }
 
   const updatedMeta = updateScanMeta(scanId, {
@@ -222,11 +253,11 @@ function scheduleRetry(scanId: string, backoffMs: number): void {
     enqueueScan(scanId);
   }, backoffMs);
 
-  retryTimers.add(retryTimer);
+  retryTimers.set(retryTimer, scanId);
 }
 
 function clearPendingRetryTimers(): void {
-  for (const retryTimer of retryTimers) {
+  for (const retryTimer of retryTimers.keys()) {
     clearTimeout(retryTimer);
   }
   retryTimers.clear();
@@ -270,8 +301,19 @@ function normalizeScanRuntimeError(error: unknown): ScanRuntimeErrorInfo {
 /**
  * 현재 대기 중인 retry 타이머 개수를 반환합니다.
  */
-export function getPendingRetryTimerCount(): number {
-  return retryTimers.size;
+export function getPendingRetryTimerCount(filter?: QueueTenantFilter): number {
+  if (!filter?.tenantId) {
+    return retryTimers.size;
+  }
+
+  let count = 0;
+  for (const scanId of retryTimers.values()) {
+    if (matchesTenantFilter(scanId, filter)) {
+      count += 1;
+    }
+  }
+
+  return count;
 }
 
 /**
@@ -284,13 +326,21 @@ export function isScanWorkerRunning(): boolean {
 /**
  * 큐 운영 상태를 요약해 반환합니다.
  */
-export function getQueueStatus(): ScanQueueStatus {
+export function getQueueStatus(filter?: QueueTenantFilter): ScanQueueStatus {
+  const queuedJobs = filter?.tenantId
+    ? scanJobQueue.filter((scanId) => matchesTenantFilter(scanId, filter)).length
+    : getQueueSize();
+
+  const processing = filter?.tenantId
+    ? isProcessing && processingScanId !== null && matchesTenantFilter(processingScanId, filter)
+    : isProcessing;
+
   return {
-    queuedJobs: getQueueSize(),
-    deadLetters: getDeadLetterSize(),
-    pendingRetryTimers: getPendingRetryTimerCount(),
+    queuedJobs,
+    deadLetters: getDeadLetterSize(filter),
+    pendingRetryTimers: getPendingRetryTimerCount(filter),
     workerRunning: isScanWorkerRunning(),
-    processing: isProcessing,
+    processing,
   };
 }
 
@@ -310,6 +360,7 @@ export async function processNextScanJob(): Promise<ProcessNextScanJobResult> {
   }
 
   isProcessing = true;
+  processingScanId = scanId;
   let sourceCleanup: (() => Promise<void>) | null = null;
 
   try {
@@ -411,6 +462,7 @@ export async function processNextScanJob(): Promise<ProcessNextScanJobResult> {
     }
 
     isProcessing = false;
+    processingScanId = null;
   }
 }
 
@@ -451,5 +503,6 @@ export function clearQueue(): void {
   forcedFailureByScanId.clear();
   forcedCleanupFailureByScanId.clear();
   isProcessing = false;
+  processingScanId = null;
   clearPendingRetryTimers();
 }

@@ -10,10 +10,12 @@ import {
   stopScanWorker,
 } from "../src/scanner/queue.js";
 import { clearStore } from "../src/scanner/store.js";
+import type { UserRole } from "../src/tenants/types.js";
 
 const ORIGINAL_RETRY_BACKOFF_BASE_MS = process.env.SCAN_RETRY_BACKOFF_BASE_MS;
 const ORIGINAL_MAX_RETRIES = process.env.SCAN_MAX_RETRIES;
 const ORIGINAL_SCAN_EXECUTION_MODE = process.env.SCAN_EXECUTION_MODE;
+const ORIGINAL_TENANT_AUTH_MODE = process.env.TENANT_AUTH_MODE;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -21,6 +23,23 @@ function restoreEnv(name: string, value: string | undefined): void {
     return;
   }
   process.env[name] = value;
+}
+
+function buildTenantHeaders(options: {
+  tenantId?: string;
+  userId?: string;
+  role?: UserRole;
+} = {}): Record<string, string> {
+  const headers: Record<string, string> = {
+    "x-user-id": options.userId ?? "user-1",
+    "x-user-role": options.role ?? "admin",
+  };
+
+  if (options.tenantId !== undefined) {
+    headers["x-tenant-id"] = options.tenantId;
+  }
+
+  return headers;
 }
 
 async function moveScanToDeadLetter(scanId: string): Promise<void> {
@@ -61,6 +80,7 @@ describe("Scans API", () => {
     process.env.SCAN_RETRY_BACKOFF_BASE_MS = "100";
     process.env.SCAN_MAX_RETRIES = "2";
     process.env.SCAN_EXECUTION_MODE = "mock";
+    delete process.env.TENANT_AUTH_MODE;
     vi.useRealTimers();
   });
 
@@ -68,6 +88,7 @@ describe("Scans API", () => {
     restoreEnv("SCAN_RETRY_BACKOFF_BASE_MS", ORIGINAL_RETRY_BACKOFF_BASE_MS);
     restoreEnv("SCAN_MAX_RETRIES", ORIGINAL_MAX_RETRIES);
     restoreEnv("SCAN_EXECUTION_MODE", ORIGINAL_SCAN_EXECUTION_MODE);
+    restoreEnv("TENANT_AUTH_MODE", ORIGINAL_TENANT_AUTH_MODE);
     vi.useRealTimers();
   });
 
@@ -578,6 +599,273 @@ describe("Scans API", () => {
       expect(deadLettersRes.statusCode).toBe(200);
       expect(deadLettersRes.json()).toHaveLength(1);
       expect(deadLettersRes.json()[0]?.scanId).toBe(scanId);
+    });
+  });
+
+  describe("Tenant auth mode (required)", () => {
+    beforeEach(() => {
+      process.env.TENANT_AUTH_MODE = "required";
+    });
+
+    it("x-user-id 헤더가 없으면 401을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          "x-user-role": "admin",
+        },
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-auth-missing-user" },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_USER_ID_REQUIRED");
+    });
+
+    it("x-user-role 헤더가 없으면 401을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          "x-user-id": "user-auth-missing-role",
+        },
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-auth-missing-role" },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().code).toBe("TENANT_AUTH_USER_ROLE_REQUIRED");
+    });
+
+    it("x-user-role 값이 유효하지 않으면 400을 반환해야 한다", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          "x-user-id": "user-auth-invalid-role",
+          "x-user-role": "super-admin",
+        },
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-auth-invalid-role" },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe("TENANT_AUTH_INVALID_USER_ROLE");
+    });
+
+    it("x-tenant-id가 없으면 default tenant로 처리해야 한다", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: {
+          "x-user-id": "user-default-tenant",
+          "x-user-role": "member",
+        },
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-default-tenant" },
+      });
+
+      expect(createRes.statusCode).toBe(202);
+      const { scanId } = createRes.json();
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanId}`,
+        headers: {
+          "x-user-id": "user-default-tenant",
+          "x-user-role": "member",
+        },
+      });
+
+      expect(getRes.statusCode).toBe(200);
+      expect(getRes.json().tenantId).toBe("default");
+    });
+  });
+
+  describe("Tenant isolation (required auth mode)", () => {
+    beforeEach(() => {
+      process.env.TENANT_AUTH_MODE = "required";
+    });
+
+    it("다른 tenant의 스캔은 목록/단건 조회에서 보이지 않아야 한다", async () => {
+      const tenantAHeaders = buildTenantHeaders({
+        tenantId: "tenant-a",
+        userId: "user-tenant-a",
+        role: "member",
+      });
+      const tenantBHeaders = buildTenantHeaders({
+        tenantId: "tenant-b",
+        userId: "user-tenant-b",
+        role: "member",
+      });
+
+      const createResA = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantAHeaders,
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-tenant-a" },
+      });
+      const createResB = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantBHeaders,
+        payload: { engine: "trivy", repoUrl: "https://github.com/test/repo-tenant-b" },
+      });
+
+      const scanIdA = createResA.json().scanId as string;
+      const scanIdB = createResB.json().scanId as string;
+
+      const listResA = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans",
+        headers: tenantAHeaders,
+      });
+
+      expect(listResA.statusCode).toBe(200);
+      expect(listResA.json()).toHaveLength(1);
+      expect(listResA.json()[0]?.id).toBe(scanIdA);
+      expect(listResA.json()[0]?.tenantId).toBe("tenant-a");
+
+      const getForeignRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanIdB}`,
+        headers: tenantAHeaders,
+      });
+
+      expect(getForeignRes.statusCode).toBe(404);
+      expect(getForeignRes.json().code).toBe("SCAN_NOT_FOUND");
+
+      const getOwnRes = await app.inject({
+        method: "GET",
+        url: `/api/v1/scans/${scanIdA}`,
+        headers: tenantAHeaders,
+      });
+
+      expect(getOwnRes.statusCode).toBe(200);
+      expect(getOwnRes.json().id).toBe(scanIdA);
+    });
+  });
+
+  describe("Queue/Dead-letter authorization + tenant filter (required auth mode)", () => {
+    beforeEach(() => {
+      process.env.TENANT_AUTH_MODE = "required";
+    });
+
+    it("member 권한은 queue/dead-letter admin API에 접근할 수 없어야 한다", async () => {
+      const adminHeaders = buildTenantHeaders({
+        tenantId: "tenant-rbac-a",
+        userId: "admin-rbac-a",
+        role: "admin",
+      });
+
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: adminHeaders,
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-rbac-member-deny" },
+      });
+      const scanId = createRes.json().scanId as string;
+      await moveScanToDeadLetter(scanId);
+
+      const memberHeaders = buildTenantHeaders({
+        tenantId: "tenant-rbac-a",
+        userId: "member-rbac-a",
+        role: "member",
+      });
+
+      const queueStatusRes = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/queue/status",
+        headers: memberHeaders,
+      });
+      expect(queueStatusRes.statusCode).toBe(403);
+      expect(queueStatusRes.json().code).toBe("TENANT_FORBIDDEN");
+
+      const deadLettersRes = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/dead-letters",
+        headers: memberHeaders,
+      });
+      expect(deadLettersRes.statusCode).toBe(403);
+      expect(deadLettersRes.json().code).toBe("TENANT_FORBIDDEN");
+
+      const redriveRes = await app.inject({
+        method: "POST",
+        url: `/api/v1/scans/${scanId}/redrive`,
+        headers: memberHeaders,
+      });
+      expect(redriveRes.statusCode).toBe(403);
+      expect(redriveRes.json().code).toBe("TENANT_FORBIDDEN");
+    });
+
+    it("admin 권한에서는 queue/dead-letter가 tenant별로 분리되어 보여야 한다", async () => {
+      const tenantAHeaders = buildTenantHeaders({
+        tenantId: "tenant-admin-a",
+        userId: "admin-a",
+        role: "admin",
+      });
+      const tenantBHeaders = buildTenantHeaders({
+        tenantId: "tenant-admin-b",
+        userId: "admin-b",
+        role: "admin",
+      });
+
+      const createResA = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantAHeaders,
+        payload: { engine: "semgrep", repoUrl: "https://github.com/test/repo-admin-a" },
+      });
+      const createResB = await app.inject({
+        method: "POST",
+        url: "/api/v1/scans",
+        headers: tenantBHeaders,
+        payload: { engine: "trivy", repoUrl: "https://github.com/test/repo-admin-b" },
+      });
+
+      const scanIdA = createResA.json().scanId as string;
+      const scanIdB = createResB.json().scanId as string;
+
+      await moveScanToDeadLetter(scanIdA);
+      await moveScanToDeadLetter(scanIdB);
+
+      const statusResA = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/queue/status",
+        headers: tenantAHeaders,
+      });
+
+      expect(statusResA.statusCode).toBe(200);
+      expect(statusResA.json().deadLetters).toBe(1);
+
+      const deadLettersResA = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/dead-letters",
+        headers: tenantAHeaders,
+      });
+
+      expect(deadLettersResA.statusCode).toBe(200);
+      expect(deadLettersResA.json()).toHaveLength(1);
+      expect(deadLettersResA.json()[0]?.scanId).toBe(scanIdA);
+
+      const crossTenantRedriveRes = await app.inject({
+        method: "POST",
+        url: `/api/v1/scans/${scanIdB}/redrive`,
+        headers: tenantAHeaders,
+      });
+      expect(crossTenantRedriveRes.statusCode).toBe(404);
+      expect(crossTenantRedriveRes.json().code).toBe("DEAD_LETTER_NOT_FOUND");
+
+      const ownRedriveRes = await app.inject({
+        method: "POST",
+        url: `/api/v1/scans/${scanIdA}/redrive`,
+        headers: tenantAHeaders,
+      });
+      expect(ownRedriveRes.statusCode).toBe(202);
+
+      const deadLettersAfterRedrive = await app.inject({
+        method: "GET",
+        url: "/api/v1/scans/dead-letters",
+        headers: tenantAHeaders,
+      });
+      expect(deadLettersAfterRedrive.statusCode).toBe(200);
+      expect(deadLettersAfterRedrive.json()).toHaveLength(0);
     });
   });
 });

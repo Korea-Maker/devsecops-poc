@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { classifyRepoUrlInput, normalizeRepoUrlInput } from "../scanner/source-prep.js";
 import {
   enqueueScan,
@@ -9,6 +9,11 @@ import {
 } from "../scanner/queue.js";
 import { createScan, getScan, listScans } from "../scanner/store.js";
 import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
+import {
+  getTenantAuthMode,
+  requireMinimumRole,
+  tenantAuthOnRequest,
+} from "../tenants/auth.js";
 
 /** 유효한 스캔 엔진 목록 */
 const VALID_ENGINES = ["semgrep", "trivy", "gitleaks"] as const;
@@ -89,7 +94,19 @@ function toErrorMessage(error: unknown): string {
   return "요청 처리 중 오류가 발생했습니다";
 }
 
+function getOptionalTenantFilter(
+  request: FastifyRequest
+): { tenantId: string } | undefined {
+  if (getTenantAuthMode() !== "required") {
+    return undefined;
+  }
+
+  return { tenantId: request.tenantContext.tenantId };
+}
+
 export const scanRoutes: FastifyPluginAsync = async (app) => {
+  app.addHook("onRequest", tenantAuthOnRequest);
+
   app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);
     if (reply.sent) {
@@ -142,6 +159,7 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const record = createScan({
+      tenantId: request.tenantContext.tenantId,
       engine,
       repoUrl: normalizeRepoUrlInput(repoUrl),
       branch: isNonEmptyString(branch) ? branch.trim() : "main",
@@ -160,14 +178,21 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
       // 유효하지 않은 status 값은 무시하고 전체 반환
       const validStatus = isScanStatus(status) ? status : undefined;
 
-      const scans = listScans(validStatus ? { status: validStatus } : undefined);
+      const scans = listScans({
+        tenantId: request.tenantContext.tenantId,
+        status: validStatus,
+      });
       return reply.status(200).send(scans);
     }
   );
 
   /** GET /api/v1/scans/queue/status — 큐 운영 상태 요약 조회 */
-  app.get("/api/v1/scans/queue/status", async (_request, reply) => {
-    return reply.status(200).send(getQueueStatus());
+  app.get("/api/v1/scans/queue/status", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "admin")) {
+      return;
+    }
+
+    return reply.status(200).send(getQueueStatus(getOptionalTenantFilter(request)));
   });
 
   /** POST /api/v1/scans/queue/process-next — 즉시 다음 작업 1건 처리 트리거 */
@@ -187,16 +212,24 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /** GET /api/v1/scans/dead-letters — dead-letter 목록 조회 */
-  app.get("/api/v1/scans/dead-letters", async (_request, reply) => {
-    return reply.status(200).send(listDeadLetters());
+  app.get("/api/v1/scans/dead-letters", async (request, reply) => {
+    if (!requireMinimumRole(request, reply, "admin")) {
+      return;
+    }
+
+    return reply.status(200).send(listDeadLetters(getOptionalTenantFilter(request)));
   });
 
   /** POST /api/v1/scans/:id/redrive — dead-letter 재처리 요청 */
   app.post<{ Params: { id: string } }>(
     "/api/v1/scans/:id/redrive",
     async (request, reply) => {
+      if (!requireMinimumRole(request, reply, "admin")) {
+        return;
+      }
+
       const scanId = request.params.id;
-      const redriveResult = redriveDeadLetter(scanId);
+      const redriveResult = redriveDeadLetter(scanId, getOptionalTenantFilter(request));
 
       if (redriveResult === "accepted") {
         return reply.status(202).send({ scanId, status: "queued" });
@@ -225,7 +258,7 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
     "/api/v1/scans/:id",
     async (request, reply) => {
       const scan = getScan(request.params.id);
-      if (!scan) {
+      if (!scan || scan.tenantId !== request.tenantContext.tenantId) {
         return sendError(reply, 404, "스캔을 찾을 수 없습니다", "SCAN_NOT_FOUND");
       }
       return reply.status(200).send(scan);
