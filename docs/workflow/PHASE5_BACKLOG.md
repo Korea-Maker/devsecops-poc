@@ -2,8 +2,8 @@
 
 ## 목표
 
-스캔 API에 최소한의 멀티 테넌트 격리와 헤더 기반 인증/인가를 도입해,
-조직(tenant) 간 데이터 노출을 차단하는 기반을 완성한다.
+스캔 API에 최소한의 멀티 테넌트 격리와 인증/인가를 도입해,
+조직(tenant) 간 데이터 노출을 차단하고 JWT/OAuth 전환 기반을 마련한다.
 
 ---
 
@@ -12,11 +12,18 @@
 - [x] Fastify 요청 단위 tenant/auth 컨텍스트 미들웨어 추가
   - 파일: `apps/api/src/tenants/auth.ts`
   - 환경변수: `TENANT_AUTH_MODE=disabled|required` (기본 `disabled`)
-  - `required` 모드 헤더 계약:
+  - `required` + `AUTH_MODE=header` 헤더 계약:
     - `x-tenant-id` (선택, 미전달 시 `default`)
     - `x-user-id` (필수)
     - `x-user-role` (필수: `owner|admin|member|viewer`)
   - 역할 비교 헬퍼(`hasRoleAtLeast`) + 최소 권한 체크(`requireMinimumRole`) 제공
+
+- [x] 인증 모드 추상화 + JWT 전환 스캐폴드 추가
+  - 신규 환경변수: `AUTH_MODE=header|jwt` (기본 `header`)
+  - `TENANT_AUTH_MODE` 기존 계약과 완전 호환(미설정/기존 설정 동작 유지)
+  - `AUTH_MODE=jwt`에서 `Authorization: Bearer <token>` 구조 검사
+  - JWT placeholder env 추가: `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`
+  - 서명 검증 미구현 상태를 안전하게 명시(`TENANT_AUTH_JWT_NOT_IMPLEMENTED`, TODO 포함)
 
 - [x] Scans API tenant 격리 적용
   - `POST /api/v1/scans`: tenant context의 `tenantId`를 scan 레코드에 저장
@@ -53,16 +60,20 @@
 
 - [x] 테스트/문서 갱신
   - API 테스트 추가:
-    - tenant 격리(list/get)
-    - `TENANT_AUTH_MODE=required` 헤더 누락/역할 오류
-    - queue/dead-letter admin 권한 검사
-  - README에 멀티테넌시/헤더 계약/환경변수 문서화
+    - `AUTH_MODE` fallback/`jwt` 스캐폴드 동작
+    - JWT 모드 invalid token/header 케이스(401/503/501 계약)
+    - tenant 격리(list/get), queue/dead-letter admin 권한 검사
+  - 문서 갱신:
+    - `README.md` 인증 모드/환경변수/제약 업데이트
+    - `docs/architecture/AUTH_TRANSITION.md` 신규 추가(경계, trust model, rollout)
 
 ---
 
 ## 아직 남은 작업 (Phase 5 후속)
 
-- [ ] 실제 인증 체계 연동 (JWT/OAuth/SSO) 및 헤더 신뢰 경계 정립
+- [ ] JWT 실검증 구현 (JWKS 서명 검증 + `iss/aud/exp/nbf` 검증)
+- [ ] JWT claims → `tenantContext(tenantId,userId,role)` 매핑 스펙 확정
+- [ ] OAuth/OIDC 로그인 플로우(웹) 연동 및 토큰 발급 체계 연결
 - [ ] 조직/멤버십 API 고도화 (초대 토큰/페이지네이션/검색/비활성화)
 - [ ] DB 영속화 + tenant 인덱싱/행 수준 격리(RLS) 설계
 - [ ] 감사 로그 영속화/보존정책/검색 쿼리 고도화
@@ -73,4 +84,5 @@
 ## 참고
 
 - `docs/workflow/MASTER_PLAN.md` (Phase 5 상위 목표)
+- `docs/architecture/AUTH_TRANSITION.md` (Header → JWT/OAuth 전환 설계)
 - `README.md` (현재 API 계약/환경변수)
