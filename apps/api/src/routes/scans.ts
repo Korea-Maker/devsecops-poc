@@ -2,8 +2,8 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { classifyRepoUrlInput, normalizeRepoUrlInput } from "../scanner/source-prep.js";
 import {
   enqueueScan,
-  getQueueStatus,
-  listDeadLetters,
+  getQueueStatusForTenantReadPath,
+  listDeadLettersForTenantReadPath,
   processNextScanJob,
   redriveDeadLetter,
 } from "../scanner/queue.js";
@@ -13,6 +13,7 @@ import {
   listScansForTenantReadPath,
 } from "../scanner/store.js";
 import type { ScanEngineType, ScanStatus } from "../scanner/types.js";
+import type { UserRole } from "../tenants/types.js";
 import {
   getTenantAuthMode,
   requireMinimumRole,
@@ -108,6 +109,20 @@ function getOptionalTenantFilter(
   return { tenantId: request.tenantContext.tenantId };
 }
 
+function getOptionalQueueReadContext(
+  request: FastifyRequest
+): { tenantId: string; userId?: string; userRole?: UserRole } | undefined {
+  if (getTenantAuthMode() !== "required") {
+    return undefined;
+  }
+
+  return {
+    tenantId: request.tenantContext.tenantId,
+    userId: request.tenantContext.userId,
+    userRole: request.tenantContext.role,
+  };
+}
+
 export const scanRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("onRequest", tenantAuthOnRequest);
 
@@ -198,7 +213,10 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
-    return reply.status(200).send(getQueueStatus(getOptionalTenantFilter(request)));
+    const queueStatus = await getQueueStatusForTenantReadPath(
+      getOptionalQueueReadContext(request)
+    );
+    return reply.status(200).send(queueStatus);
   });
 
   /** POST /api/v1/scans/queue/process-next — 즉시 다음 작업 1건 처리 트리거 */
@@ -227,7 +245,10 @@ export const scanRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
-    return reply.status(200).send(listDeadLetters(getOptionalTenantFilter(request)));
+    const deadLetters = await listDeadLettersForTenantReadPath(
+      getOptionalQueueReadContext(request)
+    );
+    return reply.status(200).send(deadLetters);
   });
 
   /** POST /api/v1/scans/:id/redrive — dead-letter 재처리 요청 */

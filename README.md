@@ -157,14 +157,17 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
   - tenant audit logs
 - 서버 시작 시 경량 migration 버저닝(`schema_migrations`)을 기준으로 schema를 순차/멱등 적용
 - 서버 시작 시 PostgreSQL 데이터로 인메모리 스토어(scans/queue/dead-letter/retry schedule/org/membership/invite token/audit log)를 hydrate
-- request-path DB direct read pilot/확장 (Ops MVP Phase M/N)
+- request-path DB direct read 확장 (Ops MVP Phase M/N/Q/S)
   - `GET /api/v1/scans`
   - `GET /api/v1/scans/:id`
+  - `GET /api/v1/scans/queue/status` (`TENANT_AUTH_MODE=required` tenant scope, `queuedJobs/deadLetters/pendingRetryTimers`를 DB direct count로 조회)
+  - `GET /api/v1/scans/dead-letters` (`TENANT_AUTH_MODE=required` tenant scope)
   - `GET /api/v1/organizations` (`TENANT_AUTH_MODE=required` tenant scope, search/page/limit)
   - `GET /api/v1/organizations/:id` (`TENANT_AUTH_MODE=required` tenant scope)
   - `GET /api/v1/organizations/:id/memberships` (`TENANT_AUTH_MODE=required` tenant scope)
   - `GET /api/v1/organizations/:id/audit-logs` (`TENANT_AUTH_MODE=required` tenant scope, 기존 필터 계약 유지)
   - `DATA_BACKEND=postgres`일 때 tenant-scoped PostgreSQL direct query를 우선 사용하고, memory 백엔드/기존 응답 계약은 그대로 유지
+  - `queue/status`의 `workerRunning`, `processing`은 런타임 워커 상태이므로 기존과 동일하게 인메모리 상태를 사용
 - queue/dead-letter/retry snapshot 저장은 단일 PostgreSQL transaction(`BEGIN/COMMIT`)으로 수행되어 교체 중간 상태 노출을 방지
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
 - 비정상 종료 시 retry timer 대기 작업은 startup recovery에서 즉시 재적재 또는 남은 backoff로 재타이머링
@@ -446,7 +449,8 @@ pnpm --filter @devsecops/web build
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
 - **Tenant RLS는 opt-in preview 단계**: 기본값은 `TENANT_RLS_MODE=off`이며, `enforce`는 tenant 대상 영속화 테이블에 적용된다. queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지되고, startup/hydration·retention prune 경로는 `service` 컨텍스트로 동작한다.
 - **Runtime role separation guard는 opt-in hardening**: `TENANT_RLS_RUNTIME_GUARD_MODE` 기본값은 `off`, `warn`(관측), `enforce`(차단)로 단계적 적용한다.
-- **Full request-path DB direct query는 아직 진행 중**: 현재 postgres direct read 적용 범위는 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs`이며, queue/dead-letter/status 등 나머지 tenant read path는 후속 단계에서 점진 전환한다.
+- **request-path DB direct read 범위(tenant read endpoint 기준)는 전환 완료**: `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/scans/queue/status`, `GET /api/v1/scans/dead-letters`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs`
+- **queue write path는 현재 의도적으로 인메모리 워커 semantics 유지**: `POST /api/v1/scans/queue/process-next`, `POST /api/v1/scans/:id/redrive`는 in-flight 처리/타이머 materialize와 강하게 결합되어 있어 단순 DB 전환이 어렵다. 최소 다음 단계는 DB 기반 worker lease(또는 분산 락) 도입 후 write-path를 단계 전환하는 것이다.
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체

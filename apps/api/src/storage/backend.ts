@@ -123,6 +123,18 @@ export interface PersistedTenantAuditLogListQuery extends TenantScopedReadContex
   until?: string;
 }
 
+export interface PersistedQueueReadQuery {
+  tenantId?: string;
+  userId?: string;
+  userRole?: OrganizationMembership["role"] | "service";
+}
+
+export interface PersistedQueueStatusSummary {
+  queuedJobs: number;
+  deadLetters: number;
+  pendingRetryTimers: number;
+}
+
 const DEFAULT_TENANT_READ_CONTEXT_USER_ID = "runtime-reader";
 const DEFAULT_TENANT_READ_CONTEXT_ROLE: OrganizationMembership["role"] = "viewer";
 const DEFAULT_LIST_PAGE = 1;
@@ -213,6 +225,10 @@ interface ScanDeadLetterRow extends QueryResultRow {
 interface ScanRetryScheduleRow extends QueryResultRow {
   scan_id: string;
   due_at: string;
+}
+
+interface CountRow extends QueryResultRow {
+  count: string | number | bigint;
 }
 
 let activeBackend: DataBackend = "memory";
@@ -416,6 +432,48 @@ function createTenantRlsContextForRead(context: TenantScopedReadContext): Tenant
         : DEFAULT_TENANT_READ_CONTEXT_USER_ID,
     userRole: context.userRole ?? DEFAULT_TENANT_READ_CONTEXT_ROLE,
   });
+}
+
+function resolveQueueReadContext(query: PersistedQueueReadQuery): {
+  tenantId?: string;
+  tenantRlsContext: TenantRlsSessionContext;
+  expectedScope: TenantRlsOperationScope;
+} {
+  const normalizedTenantId = query.tenantId?.trim();
+
+  if (normalizedTenantId && normalizedTenantId.length > 0) {
+    return {
+      tenantId: normalizedTenantId,
+      tenantRlsContext: createTenantRlsContextForRead({
+        tenantId: normalizedTenantId,
+        userId: query.userId,
+        userRole: query.userRole,
+      }),
+      expectedScope: "tenant",
+    };
+  }
+
+  return {
+    tenantRlsContext: SYSTEM_TENANT_RLS_CONTEXT,
+    expectedScope: "service",
+  };
+}
+
+function toNumericCount(value: unknown): number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) ? parsed : 0;
+  }
+
+  return 0;
 }
 
 function normalizeOptionalSearchTerm(value: string | undefined): string | undefined {
@@ -1338,6 +1396,15 @@ async function waitForPersistenceQueueDrain(): Promise<void> {
   }
 }
 
+async function readPersistedCount(
+  client: SqlClient,
+  statement: string,
+  values: unknown[] = []
+): Promise<number> {
+  const result = await client.query<CountRow>(statement, values);
+  return toNumericCount(result.rows[0]?.count);
+}
+
 export async function listPersistedScansForTenant(
   query: PersistedScanListQuery
 ): Promise<ScanRecord[] | null> {
@@ -1734,6 +1801,168 @@ export async function listPersistedTenantAuditLogsForTenant(
     },
     activeTenantRlsMode,
     "tenant"
+  );
+}
+
+export async function listPersistedDeadLettersForTenant(
+  query: PersistedQueueReadQuery = {}
+): Promise<PersistedDeadLetterItem[] | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const resolvedQueueReadContext = resolveQueueReadContext(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "listPersistedDeadLettersForTenant",
+    resolvedQueueReadContext.tenantRlsContext,
+    async () => {
+      if (resolvedQueueReadContext.tenantId) {
+        const result = await client.query<ScanDeadLetterRow>(
+          `
+            SELECT
+              dead_letters.id,
+              dead_letters.scan_id,
+              dead_letters.retry_count,
+              dead_letters.error,
+              dead_letters.code,
+              dead_letters.failed_at
+            FROM scan_dead_letters AS dead_letters
+            INNER JOIN scans AS scans ON scans.id = dead_letters.scan_id
+            WHERE scans.tenant_id = $1
+            ORDER BY dead_letters.id ASC
+          `,
+          [resolvedQueueReadContext.tenantId]
+        );
+
+        return result.rows.map(mapQueueDeadLetterRowToEntity);
+      }
+
+      const result = await client.query<ScanDeadLetterRow>(
+        `
+          SELECT
+            id,
+            scan_id,
+            retry_count,
+            error,
+            code,
+            failed_at
+          FROM scan_dead_letters
+          ORDER BY id ASC
+        `
+      );
+
+      return result.rows.map(mapQueueDeadLetterRowToEntity);
+    },
+    activeTenantRlsMode,
+    resolvedQueueReadContext.expectedScope
+  );
+}
+
+export async function getPersistedQueueStatusForTenant(
+  query: PersistedQueueReadQuery = {}
+): Promise<PersistedQueueStatusSummary | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const resolvedQueueReadContext = resolveQueueReadContext(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "getPersistedQueueStatusForTenant",
+    resolvedQueueReadContext.tenantRlsContext,
+    async () => {
+      if (resolvedQueueReadContext.tenantId) {
+        const values: unknown[] = [resolvedQueueReadContext.tenantId];
+
+        const [queuedJobs, deadLetters, pendingRetryTimers] = await Promise.all([
+          readPersistedCount(
+            client,
+            `
+              SELECT COUNT(*)::bigint AS count
+              FROM scan_queue_jobs AS queue_jobs
+              INNER JOIN scans AS scans ON scans.id = queue_jobs.scan_id
+              WHERE scans.tenant_id = $1
+            `,
+            values
+          ),
+          readPersistedCount(
+            client,
+            `
+              SELECT COUNT(*)::bigint AS count
+              FROM scan_dead_letters AS dead_letters
+              INNER JOIN scans AS scans ON scans.id = dead_letters.scan_id
+              WHERE scans.tenant_id = $1
+            `,
+            values
+          ),
+          readPersistedCount(
+            client,
+            `
+              SELECT COUNT(*)::bigint AS count
+              FROM scan_retry_schedules AS retry_schedules
+              INNER JOIN scans AS scans ON scans.id = retry_schedules.scan_id
+              WHERE scans.tenant_id = $1
+            `,
+            values
+          ),
+        ]);
+
+        return {
+          queuedJobs,
+          deadLetters,
+          pendingRetryTimers,
+        };
+      }
+
+      const [queuedJobs, deadLetters, pendingRetryTimers] = await Promise.all([
+        readPersistedCount(
+          client,
+          `
+            SELECT COUNT(*)::bigint AS count
+            FROM scan_queue_jobs
+          `
+        ),
+        readPersistedCount(
+          client,
+          `
+            SELECT COUNT(*)::bigint AS count
+            FROM scan_dead_letters
+          `
+        ),
+        readPersistedCount(
+          client,
+          `
+            SELECT COUNT(*)::bigint AS count
+            FROM scan_retry_schedules
+          `
+        ),
+      ]);
+
+      return {
+        queuedJobs,
+        deadLetters,
+        pendingRetryTimers,
+      };
+    },
+    activeTenantRlsMode,
+    resolvedQueueReadContext.expectedScope
   );
 }
 

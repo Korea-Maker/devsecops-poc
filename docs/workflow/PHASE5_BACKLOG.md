@@ -167,6 +167,17 @@
     - tenant read path 선택 + tenant filtering correctness
     - startup warning/guard sanity 로직
 
+- [x] Ops MVP Phase S request-path DB direct read 마무리(큐 조회 계열)
+  - tenant-scoped read 경로 확장:
+    - `GET /api/v1/scans/queue/status`
+    - `GET /api/v1/scans/dead-letters`
+  - `DATA_BACKEND=postgres`에서 queue/dead-letter/retry 상태를 tenant join(`scans.tenant_id`) direct query로 조회
+  - 기존 API 계약 유지:
+    - 응답 shape/status code unchanged
+    - memory backend 동작 unchanged
+    - `queue/status`의 `workerRunning`, `processing`은 런타임 워커 상태를 반영하기 위해 기존 인메모리 상태를 유지
+  - targeted 테스트 + README/백로그 문서 갱신
+
 - [x] Ops MVP Phase O SaaS 인프라 자동화 하드닝 1차 적용
   - Terraform 모듈 skeleton 추가: `infra/terraform/modules/{vpc,rds,ecs,s3}`
   - 안전 기본값 적용: `allow_resource_creation=false` + module toggle(`enable_*`) 기본 false
@@ -196,7 +207,8 @@
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
 - [x] tenant RLS migration/role 분리 opt-in preview 적용 (`TENANT_RLS_MODE`)
-- [ ] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs` 전환 완료)
+- [x] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/scans/queue/status`, `GET /api/v1/scans/dead-letters`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs` 전환 완료)
+  - note: queue write endpoint(`POST /api/v1/scans/queue/process-next`, `POST /api/v1/scans/:id/redrive`)는 워커 in-flight/retry timer semantics와 결합되어 있어 DB 기반 worker lease(또는 분산 락) 도입 후 단계 전환 예정
 - [x] runtime role separation guard 운영 기본값/롤아웃 정책 확정 (`TENANT_RLS_RUNTIME_GUARD_MODE` off→warn→enforce 절차 + 체크포인트/abort 기준 문서화)
 - [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)

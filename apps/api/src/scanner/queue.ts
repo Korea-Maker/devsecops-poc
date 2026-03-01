@@ -1,4 +1,7 @@
 import {
+  getActiveDataBackend,
+  getPersistedQueueStatusForTenant,
+  listPersistedDeadLettersForTenant,
   persistQueueState,
   type PersistedDeadLetterItem,
   type PersistedQueueState,
@@ -8,6 +11,7 @@ import { getScanExecutionMode } from "./adapters/common.js";
 import { getAdapter } from "./registry.js";
 import { isSourcePrepError, prepareScanSource } from "./source-prep.js";
 import { getScan, updateScanMeta, updateScanStatus } from "./store.js";
+import type { UserRole } from "../tenants/types.js";
 import type { ScanRecord } from "./store.js";
 import type { ScanErrorCode, ScanRequest } from "./types.js";
 
@@ -30,6 +34,11 @@ export type ScanRuntimeErrorCode = ScanErrorCode;
 
 interface QueueTenantFilter {
   tenantId?: string;
+}
+
+interface QueueTenantReadPathOptions extends QueueTenantFilter {
+  userId?: string;
+  userRole?: UserRole;
 }
 
 interface ScanRuntimeErrorInfo {
@@ -334,6 +343,29 @@ export function listDeadLetters(filter?: QueueTenantFilter): DeadLetterItem[] {
 }
 
 /**
+ * 요청 경로 read 최적화:
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 큐 상태를 사용
+ */
+export async function listDeadLettersForTenantReadPath(
+  options?: QueueTenantReadPathOptions
+): Promise<DeadLetterItem[]> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedDeadLetters = await listPersistedDeadLettersForTenant({
+      tenantId: options?.tenantId,
+      userId: options?.userId,
+      userRole: options?.userRole,
+    });
+
+    if (persistedDeadLetters) {
+      return persistedDeadLetters.map(cloneDeadLetterItem);
+    }
+  }
+
+  return listDeadLetters(options);
+}
+
+/**
  * dead-letter 항목을 재처리 큐에 다시 올립니다.
  * - dead-letter가 없으면 `not_found`를 반환합니다.
  * - tenant 필터가 전달되면 해당 tenant의 scan만 재처리할 수 있습니다(불일치 시 `not_found`).
@@ -562,22 +594,55 @@ export function isScanWorkerRunning(): boolean {
 /**
  * 큐 운영 상태를 요약해 반환합니다.
  */
+function getQueueProcessingStatus(filter?: QueueTenantFilter): boolean {
+  if (!filter?.tenantId) {
+    return isProcessing;
+  }
+
+  return isProcessing && processingScanId !== null && matchesTenantFilter(processingScanId, filter);
+}
+
 export function getQueueStatus(filter?: QueueTenantFilter): ScanQueueStatus {
   const queuedJobs = filter?.tenantId
     ? scanJobQueue.filter((scanId) => matchesTenantFilter(scanId, filter)).length
     : getQueueSize();
-
-  const processing = filter?.tenantId
-    ? isProcessing && processingScanId !== null && matchesTenantFilter(processingScanId, filter)
-    : isProcessing;
 
   return {
     queuedJobs,
     deadLetters: getDeadLetterSize(filter),
     pendingRetryTimers: getPendingRetryTimerCount(filter),
     workerRunning: isScanWorkerRunning(),
-    processing,
+    processing: getQueueProcessingStatus(filter),
   };
+}
+
+/**
+ * 요청 경로 read 최적화:
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 큐 상태를 사용
+ */
+export async function getQueueStatusForTenantReadPath(
+  options?: QueueTenantReadPathOptions
+): Promise<ScanQueueStatus> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedStatus = await getPersistedQueueStatusForTenant({
+      tenantId: options?.tenantId,
+      userId: options?.userId,
+      userRole: options?.userRole,
+    });
+
+    if (persistedStatus) {
+      return {
+        queuedJobs: persistedStatus.queuedJobs,
+        deadLetters: persistedStatus.deadLetters,
+        pendingRetryTimers: persistedStatus.pendingRetryTimers,
+        workerRunning: isScanWorkerRunning(),
+        processing: getQueueProcessingStatus(options),
+      };
+    }
+  }
+
+  return getQueueStatus(options);
 }
 
 /**
