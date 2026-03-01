@@ -212,6 +212,10 @@ aws ecs describe-services \
   - `terraform fmt -check` + `validate` 수행
   - `plan`은 `allow_resource_creation=false` 안전 모드로만 실행
   - terraform binary/AWS creds 누락 시 실패 대신 skip + Step Summary 기록
+- `terraform-rehearsal-dry-run.yml`:
+  - 트리거: 수동 실행(`workflow_dispatch`)
+  - `infra/scripts/terraform-rehearsal-artifacts.sh`로 dry-run 리허설 번들 생성
+  - terraform/aws 준비가 없어도 skip-safe로 종료 + artifact 업로드
 
 ### 배포 계약 (GitHub repository level)
 
@@ -239,7 +243,9 @@ aws ecs describe-services \
   - `infra/scripts/terraform-plan.sh <env> --allow-create`: 명시적으로 create plan 허용
   - `infra/scripts/terraform-apply.sh <env>`: preflight + apply 전 대화형 확인
   - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 즉시 거부
+  - `infra/scripts/terraform-rehearsal-artifacts.sh <env>`: dry-run 리허설 아티팩트 번들 생성
   - 리허설 런북: `infra/terraform/DRY_RUN_REHEARSAL_CHECKLIST.md`
+  - 운영자 핸드오프: `infra/terraform/OPERATOR_HANDOFF.md`
 
 
 ### Terraform IaC 실행 절차 (safe-by-default)

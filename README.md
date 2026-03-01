@@ -281,6 +281,9 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - 트리거: `infra/terraform/**`, `infra/scripts/terraform-*.sh`, workflow 변경
   - `fmt -check`, `validate`, `plan(안전 모드)` 수행
   - terraform binary/AWS creds 누락 시 **실패 대신 skip** + Step Summary 사유 기록
+- `.github/workflows/terraform-rehearsal-dry-run.yml`: Terraform dry-run 리허설(수동)
+  - 트리거: `workflow_dispatch`
+  - `infra/scripts/terraform-rehearsal-artifacts.sh` 실행 + 결과 artifact 업로드
 - `.github/actions/devsecops-scan/action.yml`: Composite Action
   - 스캔 생성 (POST /api/v1/scans)
   - 폴링으로 완료 대기 (최대 5분, 10초 간격)
@@ -310,7 +313,9 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
   - `infra/scripts/terraform-plan.sh <env> --allow-create`: 리소스 생성 plan 명시 허용
   - `infra/scripts/terraform-apply.sh <env>`: preflight + 대화형 확인 후 apply
   - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 실행 거부
+  - `infra/scripts/terraform-rehearsal-artifacts.sh <dev|staging|prod>`: dry-run 리허설 아티팩트 번들 생성 (skip-safe)
   - 리허설 체크리스트: `infra/terraform/DRY_RUN_REHEARSAL_CHECKLIST.md`
+  - 운영자 핸드오프: `infra/terraform/OPERATOR_HANDOFF.md`
 
 ### PostgreSQL Tenant RLS enablement / rollback runbook (Ops MVP Phase K)
 
@@ -454,6 +459,7 @@ pnpm --filter @devsecops/web build
 - `docs/architecture/AUTH_TRANSITION.md`: Header → JWT/OAuth 전환 경계/신뢰모델/롤아웃 계획
 - `docs/architecture/TENANT_RLS_ROLLOUT.md`: PostgreSQL Tenant RLS 단계적 도입 설계(세션 변수/정책/롤백 포함)
 - `docs/workflow/DEPLOYMENT.md`: staging/production 배포 전략, 체크리스트, 운영 가이드
+- `infra/terraform/OPERATOR_HANDOFF.md`: Terraform dry-run 리허설 운영자 핸드오프(runbook + stop/go + rollback)
 - `docs/workflow/PHASE3_BACKLOG.md`: Phase 3 대시보드/리포팅 구현 기록
 - `docs/workflow/PHASE4_BACKLOG.md`: Phase 4 GitHub CI/CD 연동 구현 기록
 - `docs/workflow/PHASE5_BACKLOG.md`: Phase 5 멀티테넌시/인증 기반 구현 기록

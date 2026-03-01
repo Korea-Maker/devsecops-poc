@@ -1,0 +1,80 @@
+name: Terraform Rehearsal Dry Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "리허설 대상 환경"
+        type: choice
+        required: true
+        default: staging
+        options:
+          - dev
+          - staging
+          - prod
+      allow_create_plan:
+        description: "allow_resource_creation=true plan도 포함"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal-artifacts:
+    name: Generate rehearsal artifacts (dry-run, skip-safe)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Terraform rehearsal artifact 생성
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          args=("${{ inputs.environment }}" "--ci")
+          if [[ "${{ inputs.allow_create_plan }}" == "true" ]]; then
+            args+=("--allow-create-plan")
+          fi
+
+          bash infra/scripts/terraform-rehearsal-artifacts.sh "${args[@]}" | tee /tmp/terraform-rehearsal.log
+
+          artifact_dir="$(grep '^ARTIFACT_DIR=' /tmp/terraform-rehearsal.log | tail -n1 | cut -d= -f2-)"
+          overall_status="$(grep '^OVERALL_STATUS=' /tmp/terraform-rehearsal.log | tail -n1 | cut -d= -f2-)"
+          go_decision="$(grep '^GO_DECISION=' /tmp/terraform-rehearsal.log | tail -n1 | cut -d= -f2-)"
+
+          if [[ -z "$artifact_dir" ]]; then
+            artifact_dir="infra/rehearsal-artifacts"
+          fi
+
+          echo "artifact_dir=${artifact_dir}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=terraform-rehearsal-$(basename "$artifact_dir")" >> "$GITHUB_OUTPUT"
+          echo "overall_status=${overall_status:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "go_decision=${go_decision:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Rehearsal artifact 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.run.outputs.artifact_name }}
+          path: ${{ steps.run.outputs.artifact_dir }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Terraform rehearsal dry-run (manual)"
+            echo "- environment: \`${{ inputs.environment }}\`"
+            echo "- overall status: **${{ steps.run.outputs.overall_status }}**"
+            echo "- go decision: **${{ steps.run.outputs.go_decision }}**"
+            echo "- artifact bundle: \`${{ steps.run.outputs.artifact_dir }}\`"
+            echo ""
+            echo "이 워크플로우는 skip-safe/non-blocking 용도라 terraform/aws 미준비 상태에서도 아티팩트를 남기고 종료합니다."
+          } >> "$GITHUB_STEP_SUMMARY"

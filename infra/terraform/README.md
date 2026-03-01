@@ -53,25 +53,31 @@ infra/terraform/
 
 ## 권장 실행 순서
 
-### 1) 값/템플릿 preflight 검증
+### 1) dry-run rehearsal 아티팩트 번들 생성 (권장)
+
+```bash
+bash infra/scripts/terraform-rehearsal-artifacts.sh staging
+```
+
+### 2) 값/템플릿 preflight 검증
 
 ```bash
 bash infra/scripts/terraform-preflight-validate.sh staging
 ```
 
-### 2) 계획 확인 (안전 모드, 생성 없음)
+### 3) 계획 확인 (안전 모드, 생성 없음)
 
 ```bash
 bash infra/scripts/terraform-plan.sh staging
 ```
 
-### 3) 생성 포함 계획 확인
+### 4) 생성 포함 계획 확인
 
 ```bash
 bash infra/scripts/terraform-plan.sh staging --allow-create
 ```
 
-### 4) 적용 (대화형 확인)
+### 5) 적용 (대화형 확인)
 
 ```bash
 # no-op apply (기본 안전모드)
@@ -81,7 +87,7 @@ bash infra/scripts/terraform-apply.sh staging
 bash infra/scripts/terraform-apply.sh staging --allow-create
 ```
 
-### 5) 프로덕션 적용 (추가 가드)
+### 6) 프로덕션 적용 (추가 가드)
 
 ```bash
 # --allow-prod 없으면 즉시 거부됨
@@ -95,6 +101,7 @@ bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
 ## Dry-run rehearsal 문서
 
 - 체크리스트: [`DRY_RUN_REHEARSAL_CHECKLIST.md`](./DRY_RUN_REHEARSAL_CHECKLIST.md)
+- 운영자 핸드오프: [`OPERATOR_HANDOFF.md`](./OPERATOR_HANDOFF.md)
 - 환경 템플릿: [`environments/templates/`](./environments/templates/)
 
 ---
@@ -102,6 +109,7 @@ bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
 ## CI 정책
 
 PR에서는 `.github/workflows/terraform-pr-checks.yml`에서 다음을 수행한다.
+수동 리허설은 `.github/workflows/terraform-rehearsal-dry-run.yml`에서 실행한다.
 
 - (optional/non-blocking) `terraform-preflight-validate.sh all --ci`
 - `terraform fmt -check -recursive`

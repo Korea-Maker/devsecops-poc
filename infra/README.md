@@ -165,6 +165,7 @@ infra/terraform/
 - `check` 블록 기반 선행조건 검증(모듈 의존성/스토리지 범위/스냅샷 설정)
 - tfvars 샘플(dev/staging/prod) + 환경 템플릿(dev/staging/prod) 추가
 - preflight validator(`infra/scripts/terraform-preflight-validate.sh`) 추가
+- rehearsal artifact generator(`infra/scripts/terraform-rehearsal-artifacts.sh`) + 운영자 handoff 문서 추가
 
 ### Terraform 실행 플로우 (정확한 절차)
 
@@ -174,19 +175,22 @@ terraform -chdir=infra/terraform fmt -recursive
 terraform -chdir=infra/terraform init -backend=false
 terraform -chdir=infra/terraform validate
 
-# 1) 값/템플릿 preflight
+# 1) dry-run rehearsal 아티팩트 번들 생성 (운영자 핸드오프용)
+bash infra/scripts/terraform-rehearsal-artifacts.sh staging
+
+# 2) 값/템플릿 preflight
 bash infra/scripts/terraform-preflight-validate.sh staging
 
-# 2) 안전 모드 plan (기본: 리소스 생성 없음)
+# 3) 안전 모드 plan (기본: 리소스 생성 없음)
 bash infra/scripts/terraform-plan.sh staging
 
-# 3) 생성 포함 plan (명시적 --allow-create 필요)
+# 4) 생성 포함 plan (명시적 --allow-create 필요)
 bash infra/scripts/terraform-plan.sh staging --allow-create
 
-# 4) apply (대화형 확인)
+# 5) apply (대화형 확인)
 bash infra/scripts/terraform-apply.sh staging --allow-create
 
-# 5) prod apply (추가 보호장치)
+# 6) prod apply (추가 보호장치)
 bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
 ```
 
@@ -253,5 +257,6 @@ Database: postgres://localhost:5432/devsecops
 ## 참고 문서
 
 - [`infra/terraform/`](./terraform/): Terraform 코드
+- [`infra/terraform/OPERATOR_HANDOFF.md`](./terraform/OPERATOR_HANDOFF.md): dry-run 리허설 운영자 핸드오프
 - [`infra/docker/`](./docker/): Docker Compose 정의
 - [`docs/workflow/DEPLOYMENT.md`](../docs/workflow/DEPLOYMENT.md): 배포 파이프라인

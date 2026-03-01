@@ -15,3 +15,5 @@ infra/terraform/*.tfstate
 infra/terraform/*.tfstate.*
 infra/terraform/plans/*.tfplan
 infra/terraform/crash.log
+infra/rehearsal-artifacts/*
+!infra/rehearsal-artifacts/.gitkeep
