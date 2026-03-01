@@ -176,6 +176,35 @@ CREATE POLICY tenant_audit_logs_tenant_isolation
    - `permission denied for relation ...` 에러율
    - tenant mismatch 탐지 지표
 
+### Runtime Guard Rollout (`TENANT_RLS_RUNTIME_GUARD_MODE`)
+
+기본값은 `off`이며, 운영 전환은 아래 순서를 따른다.
+
+1. `off` (baseline)
+   - 목적: 기존 동작/성능 baseline 확보
+   - 체크포인트: health/smoke/canary 정상, 예상치 못한 scope mismatch 로그 없음
+   - abort 기준: baseline 자체가 불안정하면 guard 전환 중단
+2. `warn` (관측)
+   - 목적: service-context/tenant-context 혼용 지점 식별
+   - 체크포인트:
+     - `tenant RLS runtime guard 위반` 경고 추세가 감소하거나 0으로 수렴
+     - 운영 필수 경로(startup/hydration/retention prune, tenant read path) 정상
+   - abort 기준:
+     - 신규 배포 이후 mismatch 경고 급증/지속
+     - canary 격리 기대치(allowed/denied)와 불일치
+3. `enforce` (차단)
+   - 목적: runtime role separation 강제
+   - 체크포인트:
+     - 5xx/permission denied 급증 없음
+     - tenant 경계 read 경로(scans/organizations/audit logs) 정상
+   - abort 기준:
+     - guard 차단으로 핵심 운영 경로 장애
+     - tenant 경계 오판단(허용/거부 반전) 확인
+
+옵션: `TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN=true`를 설정하면
+`TENANT_RLS_MODE=enforce` + `TENANT_RLS_RUNTIME_GUARD_MODE=off` 조합에서 startup 경고를 남겨
+실수 배포를 조기에 탐지할 수 있다(기본값 `false`, 비파괴).
+
 ---
 
 ## 8) 롤백 계획
@@ -223,7 +252,7 @@ ALTER TABLE tenant_audit_logs DISABLE ROW LEVEL SECURITY;
 
 ---
 
-## 10) 산출물 상태 (Ops MVP Phase M)
+## 10) 산출물 상태 (Ops MVP Phase Q)
 
 - 본 문서: **완료 (설계 + 운영 runbook 반영)**
 - DB migration 코드: **완료**
@@ -236,17 +265,20 @@ ALTER TABLE tenant_audit_logs DISABLE ROW LEVEL SECURITY;
 - 런타임 enforce 토글: **완료**
   - `TENANT_RLS_MODE=enforce`: 대상 테이블 `ENABLE + FORCE`
   - `TENANT_RLS_MODE=off|shadow`: 대상 테이블 `NO FORCE + DISABLE`
-- request-path DB direct read pilot: **완료 (1차)**
-  - `GET /api/v1/scans`, `GET /api/v1/scans/:id`가 `DATA_BACKEND=postgres`에서 tenant-scoped direct query 우선 사용
+- request-path DB direct read 확장: **완료 (현재 범위)**
+  - `GET /api/v1/scans`, `GET /api/v1/scans/:id`
+  - `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`
+  - `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs`
+  - 위 endpoint에서 `DATA_BACKEND=postgres`일 때 tenant-scoped direct query 우선 사용
   - memory backend 계약/응답 shape 유지
-- runtime role separation guardrails: **완료 (opt-in)**
+- runtime role separation guardrails: **완료 (opt-in + rollout policy)**
   - 신규 env: `TENANT_RLS_RUNTIME_GUARD_MODE=off|warn|enforce`
   - service-context vs tenant-context scope mismatch를 `warn`(경고) 또는 `enforce`(차단)로 제어
+  - 신규 선택 env: `TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN=true|false` (기본 `false`)
 
 ## 11) 현재 제약/주의사항 (preview)
 
 - 현재 아키텍처는 PostgreSQL을 **영속화 계층 + 부분 read 계층**으로 사용한다.
-- request-path DB direct query는 1차 파일럿으로 scans read endpoint(`GET /api/v1/scans`, `GET /api/v1/scans/:id`)에만 적용되어 있다.
+- request-path DB direct query는 scans + organizations/audit read 경로까지 확장되었지만, queue/dead-letter/status 등 일부 read 경로는 아직 후속 전환 대상이다.
 - queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지한다.
-- full request-path RLS(모든 tenant read path의 DB direct query 강제)와 runtime guard 기본값 전환(`warn/enforce`)은 후속 단계에서 점진 확장한다.
-
+- full request-path RLS(모든 tenant read path의 DB direct query 강제)와 runtime guard 기본값 전환(현재 기본 `off`)은 후속 단계에서 점진 확장한다.

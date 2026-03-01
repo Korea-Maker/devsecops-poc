@@ -155,6 +155,18 @@
   - DB query 레이어에서 tenant scope 조건을 명시적으로 강제하고 runtime guard 모드(`TENANT_RLS_RUNTIME_GUARD_MODE`)와 정합 유지
   - read path 선택 + tenant 필터링 검증 테스트 및 README/백로그 문서 갱신
 
+- [x] Ops MVP Phase Q request-path/guard rollout 마무리
+  - tenant-scoped read 경로 확장:
+    - `GET /api/v1/organizations` (search/page/limit 포함)
+    - `GET /api/v1/organizations/:id/audit-logs` (기존 filter 계약 유지)
+  - `DATA_BACKEND=postgres`에서 tenant-scoped direct query 우선 사용, memory backend 응답 shape 유지
+  - runtime guard rollout 문서 확정:
+    - `TENANT_RLS_RUNTIME_GUARD_MODE`를 `off -> warn -> enforce` 체크포인트/abort 기준과 함께 명시
+    - 신규 선택 env `TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN=true|false` (기본 `false`)
+  - targeted 테스트 추가:
+    - tenant read path 선택 + tenant filtering correctness
+    - startup warning/guard sanity 로직
+
 - [x] Ops MVP Phase O SaaS 인프라 자동화 하드닝 1차 적용
   - Terraform 모듈 skeleton 추가: `infra/terraform/modules/{vpc,rds,ecs,s3}`
   - 안전 기본값 적용: `allow_resource_creation=false` + module toggle(`enable_*`) 기본 false
@@ -184,8 +196,8 @@
 - [x] queue snapshot persistence를 transaction 기반으로 고도화해 강제 종료 시점의 마지막 write 유실 가능성 최소화
 - [x] tenant 인덱싱/행 수준 격리(RLS) 설계 (`docs/architecture/TENANT_RLS_ROLLOUT.md`)
 - [x] tenant RLS migration/role 분리 opt-in preview 적용 (`TENANT_RLS_MODE`)
-- [ ] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships` 전환 완료)
-- [ ] runtime role separation guard 운영 기본값/롤아웃 정책 확정 (`TENANT_RLS_RUNTIME_GUARD_MODE` warn/enforce 전환 절차)
+- [ ] full request-path DB direct query 범위 확장 (현재 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs` 전환 완료)
+- [x] runtime role separation guard 운영 기본값/롤아웃 정책 확정 (`TENANT_RLS_RUNTIME_GUARD_MODE` off→warn→enforce 절차 + 체크포인트/abort 기준 문서화)
 - [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
 - [x] staging/prod 배포 워크플로우 초안 구현 (graceful skip + post-deploy smoke contract)

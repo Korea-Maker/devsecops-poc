@@ -101,11 +101,26 @@ export interface PersistedOrganizationGetQuery extends TenantScopedReadContext {
   organizationId: string;
 }
 
+export interface PersistedOrganizationListQuery extends TenantScopedReadContext {
+  search?: string;
+  page?: number;
+  limit?: number;
+}
+
 export interface PersistedMembershipListQuery extends TenantScopedReadContext {
   organizationId: string;
   search?: string;
   page?: number;
   limit?: number;
+}
+
+export interface PersistedTenantAuditLogListQuery extends TenantScopedReadContext {
+  organizationId: string;
+  limit?: number;
+  action?: TenantAuditLog["action"];
+  filterUserId?: string;
+  since?: string;
+  until?: string;
 }
 
 const DEFAULT_TENANT_READ_CONTEXT_USER_ID = "runtime-reader";
@@ -231,6 +246,16 @@ function readTrimmedEnv(name: string): string | undefined {
 
   const normalized = rawValue.trim();
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function readBooleanEnv(name: string): boolean {
+  const rawValue = readTrimmedEnv(name);
+  if (!rawValue) {
+    return false;
+  }
+
+  const normalized = rawValue.toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
 function toErrorMessage(error: unknown): string {
@@ -504,6 +529,10 @@ function readAuditLogRetentionDays(): number | undefined {
   }
 
   return parsed;
+}
+
+function shouldWarnWhenRuntimeGuardIsOffUnderRlsEnforce(): boolean {
+  return readBooleanEnv("TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN");
 }
 
 function getAuditLogRetentionCutoffIso(nowMs = Date.now()): string | undefined {
@@ -1473,6 +1502,79 @@ export async function getPersistedOrganizationForTenant(
   );
 }
 
+export async function listPersistedOrganizationsForTenant(
+  query: PersistedOrganizationListQuery
+): Promise<Organization[] | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const tenantRlsContext = createTenantRlsContextForRead(query);
+  const normalizedSearch = normalizeOptionalSearchTerm(query.search);
+  const pagination = resolveListPagination(query);
+
+  return runWithTenantRlsContext(
+    client,
+    "listPersistedOrganizationsForTenant",
+    tenantRlsContext,
+    async () => {
+      const whereClauses = ["id = $1"];
+      const values: unknown[] = [tenantRlsContext.tenantId];
+
+      if (normalizedSearch) {
+        values.push(`%${normalizedSearch}%`);
+        const searchParam = `$${values.length}`;
+        whereClauses.push(`(LOWER(name) LIKE ${searchParam} OR LOWER(slug) LIKE ${searchParam})`);
+      }
+
+      const paginationClauses: string[] = [];
+      if (pagination.limit !== undefined && pagination.offset !== undefined) {
+        values.push(pagination.limit);
+        const limitParam = `$${values.length}`;
+
+        values.push(pagination.offset);
+        const offsetParam = `$${values.length}`;
+
+        paginationClauses.push(`LIMIT ${limitParam}`);
+        paginationClauses.push(`OFFSET ${offsetParam}`);
+      }
+
+      const paginationSql =
+        paginationClauses.length > 0
+          ? `
+          ${paginationClauses.join("\n          ")}`
+          : "";
+
+      const result = await client.query<OrganizationRow>(
+        `
+          SELECT
+            id,
+            name,
+            slug,
+            active,
+            created_at,
+            disabled_at
+          FROM organizations
+          WHERE ${whereClauses.join(" AND ")}
+          ORDER BY created_at ASC${paginationSql}
+        `,
+        values
+      );
+
+      return result.rows.map(mapOrganizationRowToEntity);
+    },
+    activeTenantRlsMode,
+    "tenant"
+  );
+}
+
 export async function listPersistedMembershipsForTenant(
   query: PersistedMembershipListQuery
 ): Promise<OrganizationMembership[] | null> {
@@ -1552,6 +1654,89 @@ export async function listPersistedMembershipsForTenant(
   );
 }
 
+export async function listPersistedTenantAuditLogsForTenant(
+  query: PersistedTenantAuditLogListQuery
+): Promise<TenantAuditLog[] | null> {
+  if (activeBackend !== "postgres" || !sqlClient) {
+    return null;
+  }
+
+  const normalizedOrganizationId = query.organizationId.trim();
+  if (normalizedOrganizationId.length === 0) {
+    return [];
+  }
+
+  await waitForPersistenceQueueDrain();
+
+  const client = sqlClient;
+  if (!client) {
+    return null;
+  }
+
+  const tenantRlsContext = createTenantRlsContextForRead(query);
+  const normalizedFilterUserId = query.filterUserId?.trim();
+  const resolvedLimit =
+    typeof query.limit === "number" && Number.isInteger(query.limit) && query.limit > 0
+      ? query.limit
+      : 50;
+
+  return runWithTenantRlsContext(
+    client,
+    "listPersistedTenantAuditLogsForTenant",
+    tenantRlsContext,
+    async () => {
+      const whereClauses = ["organization_id = $1", "organization_id = $2"];
+      const values: unknown[] = [normalizedOrganizationId, tenantRlsContext.tenantId];
+
+      if (query.action) {
+        values.push(query.action);
+        whereClauses.push(`action = $${values.length}`);
+      }
+
+      if (normalizedFilterUserId && normalizedFilterUserId.length > 0) {
+        values.push(normalizedFilterUserId);
+        const userParam = `$${values.length}`;
+        whereClauses.push(`(actor_user_id = ${userParam} OR target_user_id = ${userParam})`);
+      }
+
+      if (query.since) {
+        values.push(query.since);
+        whereClauses.push(`created_at >= $${values.length}`);
+      }
+
+      if (query.until) {
+        values.push(query.until);
+        whereClauses.push(`created_at <= $${values.length}`);
+      }
+
+      values.push(resolvedLimit);
+      const limitParam = `$${values.length}`;
+
+      const result = await client.query<TenantAuditLogRow>(
+        `
+          SELECT
+            id,
+            organization_id,
+            actor_user_id,
+            action,
+            target_user_id,
+            details,
+            created_at
+          FROM tenant_audit_logs
+          WHERE ${whereClauses.join(" AND ")}
+          ORDER BY created_at DESC
+          LIMIT ${limitParam}
+        `,
+        values
+      );
+
+      return result.rows.map(mapAuditLogRowToEntity);
+    },
+    activeTenantRlsMode,
+    "tenant"
+  );
+}
+
 export async function initializeDataBackend(
   options: InitializeDataBackendOptions = {}
 ): Promise<DataBackendInitResult> {
@@ -1575,6 +1760,16 @@ export async function initializeDataBackend(
         activeBackend,
         persistedState: createEmptyPersistedState(),
       };
+    }
+
+    if (
+      configuredTenantRlsMode === "enforce" &&
+      configuredTenantRlsRuntimeGuardMode === "off" &&
+      shouldWarnWhenRuntimeGuardIsOffUnderRlsEnforce()
+    ) {
+      warn(
+        "[storage] TENANT_RLS_MODE=enforce 이지만 TENANT_RLS_RUNTIME_GUARD_MODE=off 입니다. guard rollout이 완료되기 전까지 warn/enforce 전환을 권장합니다."
+      );
     }
 
     const databaseUrl = getDatabaseUrl();

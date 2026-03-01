@@ -1,9 +1,12 @@
 import { randomUUID } from "crypto";
 import {
   clearPersistedTenantAuditLogs,
+  getActiveDataBackend,
+  listPersistedTenantAuditLogsForTenant,
   persistTenantAuditLog,
   prunePersistedTenantAuditLogs,
 } from "../storage/backend.js";
+import type { UserRole } from "./types.js";
 
 const DEFAULT_AUDIT_LOG_LIMIT = 50;
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -36,6 +39,12 @@ interface ListTenantAuditLogsParams {
   userId?: string;
   since?: string;
   until?: string;
+}
+
+interface TenantScopedAuditLogReadOptions {
+  tenantId: string;
+  tenantUserId?: string;
+  userRole?: UserRole;
 }
 
 interface RetentionCutoff {
@@ -200,6 +209,46 @@ export function listTenantAuditLogs(params: ListTenantAuditLogsParams): TenantAu
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
   return filtered.slice(0, limit).map((log) => cloneTenantAuditLog(log));
+}
+
+/**
+ * 요청 경로 read 최적화(조직 감사로그):
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 스토어를 사용
+ */
+export async function listTenantAuditLogsForTenantReadPath(
+  params: ListTenantAuditLogsParams & TenantScopedAuditLogReadOptions
+): Promise<TenantAuditLog[]> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedLogs = await listPersistedTenantAuditLogsForTenant({
+      organizationId: params.organizationId,
+      tenantId: params.tenantId,
+      limit: params.limit,
+      action: params.action,
+      userId: params.tenantUserId,
+      filterUserId: params.userId,
+      since: params.since,
+      until: params.until,
+      userRole: params.userRole,
+    });
+
+    if (persistedLogs !== null) {
+      return persistedLogs;
+    }
+  }
+
+  if (params.organizationId !== params.tenantId) {
+    return [];
+  }
+
+  return listTenantAuditLogs({
+    organizationId: params.organizationId,
+    limit: params.limit,
+    action: params.action,
+    userId: params.userId,
+    since: params.since,
+    until: params.until,
+  });
 }
 
 /**

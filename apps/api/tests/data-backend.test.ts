@@ -24,6 +24,8 @@ const ORIGINAL_TENANT_AUDIT_LOG_RETENTION_DAYS =
 const ORIGINAL_TENANT_RLS_MODE = process.env.TENANT_RLS_MODE;
 const ORIGINAL_TENANT_RLS_RUNTIME_GUARD_MODE =
   process.env.TENANT_RLS_RUNTIME_GUARD_MODE;
+const ORIGINAL_TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN =
+  process.env.TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -70,6 +72,7 @@ beforeEach(() => {
   delete process.env.TENANT_AUDIT_LOG_RETENTION_DAYS;
   delete process.env.TENANT_RLS_MODE;
   delete process.env.TENANT_RLS_RUNTIME_GUARD_MODE;
+  delete process.env.TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN;
 });
 
 afterEach(async () => {
@@ -83,6 +86,10 @@ afterEach(async () => {
   restoreEnv(
     "TENANT_RLS_RUNTIME_GUARD_MODE",
     ORIGINAL_TENANT_RLS_RUNTIME_GUARD_MODE
+  );
+  restoreEnv(
+    "TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN",
+    ORIGINAL_TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN
   );
   await resetDataBackendForTests();
 });
@@ -148,6 +155,43 @@ describe("data backend config", () => {
       pendingRetries: [],
     });
     expect(getActiveDataBackend()).toBe("memory");
+  });
+
+  it("TENANT_RLS_MODE=enforce + runtime guard off 조합은 기본값에서 startup 경고를 내지 않아야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.TENANT_RLS_MODE = "enforce";
+    process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "off";
+    delete process.env.TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN;
+    delete process.env.DATABASE_URL;
+
+    const warn = vi.fn();
+
+    await initializeDataBackend({
+      logger: { info: () => undefined, warn, error: () => undefined },
+    });
+
+    const guardWarnings = warn.mock.calls.filter(([message]) =>
+      String(message).includes("TENANT_RLS_MODE=enforce")
+    );
+    expect(guardWarnings).toHaveLength(0);
+  });
+
+  it("TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN=true면 enforce+guard off 조합에서 startup 경고를 남겨야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.TENANT_RLS_MODE = "enforce";
+    process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "off";
+    process.env.TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN = "true";
+    delete process.env.DATABASE_URL;
+
+    const warn = vi.fn();
+
+    await initializeDataBackend({
+      logger: { info: () => undefined, warn, error: () => undefined },
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("TENANT_RLS_MODE=enforce 이지만 TENANT_RLS_RUNTIME_GUARD_MODE=off")
+    );
   });
 
   it("postgres 초기화 실패 시 memory로 fallback 해야 한다", async () => {

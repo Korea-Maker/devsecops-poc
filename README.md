@@ -160,8 +160,10 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
 - request-path DB direct read pilot/확장 (Ops MVP Phase M/N)
   - `GET /api/v1/scans`
   - `GET /api/v1/scans/:id`
+  - `GET /api/v1/organizations` (`TENANT_AUTH_MODE=required` tenant scope, search/page/limit)
   - `GET /api/v1/organizations/:id` (`TENANT_AUTH_MODE=required` tenant scope)
   - `GET /api/v1/organizations/:id/memberships` (`TENANT_AUTH_MODE=required` tenant scope)
+  - `GET /api/v1/organizations/:id/audit-logs` (`TENANT_AUTH_MODE=required` tenant scope, 기존 필터 계약 유지)
   - `DATA_BACKEND=postgres`일 때 tenant-scoped PostgreSQL direct query를 우선 사용하고, memory 백엔드/기존 응답 계약은 그대로 유지
 - queue/dead-letter/retry snapshot 저장은 단일 PostgreSQL transaction(`BEGIN/COMMIT`)으로 수행되어 교체 중간 상태 노출을 방지
 - 비정상 종료로 `running`에 멈춘 스캔은 startup recovery에서 `queued`로 전환 + queue 재적재 후 자동 재개
@@ -182,6 +184,8 @@ OIDC 로그인 + 플랫폼 토큰 발급 계약:
 - `DATABASE_URL`: PostgreSQL 연결 문자열 (`DATA_BACKEND=postgres`일 때 필수)
 - `TENANT_RLS_MODE`: `off | shadow | enforce` (기본값 `off`)
 - `TENANT_RLS_RUNTIME_GUARD_MODE`: `off | warn | enforce` (기본값 `off`, `enforce` 권장 시점: `TENANT_RLS_MODE=enforce`)
+- `TENANT_RLS_RUNTIME_GUARD_STARTUP_WARN`: `true|false` (기본값 `false`)
+  - `true`일 때 `TENANT_RLS_MODE=enforce` + `TENANT_RLS_RUNTIME_GUARD_MODE=off` 조합에서 startup 경고 로그를 출력
 - `SCAN_EXECUTION_MODE`: `mock | native` (기본값 `mock`)
 - `SCAN_RETRY_BACKOFF_BASE_MS`: 재시도 백오프 기준값(ms, 기본값 `100`)
 - `SCAN_MAX_RETRIES`: 최대 재시도 횟수(기본값 `2`)
@@ -310,19 +314,34 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 
 ### PostgreSQL Tenant RLS enablement / rollback runbook (Ops MVP Phase K)
 
-1. **기본 배포(안전값)**
+1. **Step 0: Baseline (`off`)**
    - `DATA_BACKEND=postgres`
    - `TENANT_RLS_MODE=off` (default)
    - `TENANT_RLS_RUNTIME_GUARD_MODE=off` (default)
-2. **Shadow 프리뷰**
+   - 체크포인트:
+     - 배포 후 health/smoke 통과
+     - RLS canary는 skip 또는 expected status 유지
+2. **Step 1: Observe (`warn`)**
    - `TENANT_RLS_MODE=shadow`로 배포
-   - 앱은 tenant DB session context(`app.tenant_id`, `app.user_id`, `app.user_role`)를 주입하지만, RLS 강제는 하지 않음
-   - 필요 시 `TENANT_RLS_RUNTIME_GUARD_MODE=warn`으로 context scope mismatch를 선관측
+   - `TENANT_RLS_RUNTIME_GUARD_MODE=warn`으로 배포
+   - 앱은 tenant DB session context(`app.tenant_id`, `app.user_id`, `app.user_role`)를 주입하고, guard mismatch는 경고로 관측
    - staging에서 `infra/scripts/verify-rls-canary.sh` 결과를 확인
-3. **Enforce 전환**
+   - 체크포인트:
+     - `tenant RLS runtime guard 위반` 경고 0건(또는 승인된 예외만 존재)
+     - canary allowed/denied 결과가 기대값과 일치
+   - 중단/abort 기준:
+     - 신규 mismatch 경고가 지속 발생
+     - canary denied path가 허용되거나 allowed path가 거부됨
+3. **Step 2: Enforce (`enforce`)**
    - `TENANT_RLS_MODE=enforce` + `TENANT_RLS_RUNTIME_GUARD_MODE=enforce`로 배포
    - 앱 startup 시 대상 tenant 테이블에 `ALTER TABLE ... ENABLE/FORCE ROW LEVEL SECURITY` 적용
    - runtime role separation guard가 service/tenant context misuse를 즉시 차단
+   - 체크포인트:
+     - rollout 직후 5xx/permission denied 급증 없음
+     - 주요 tenant-scoped read 경로(scans/organizations/audit logs) 정상 응답
+   - 중단/abort 기준:
+     - tenant 경계 오판단(허용/거부 반전) 확인
+     - runtime guard 차단으로 핵심 운영 경로 장애 발생
 4. **즉시 롤백**
    - `TENANT_RLS_MODE=off`, 필요 시 `TENANT_RLS_RUNTIME_GUARD_MODE=off`로 되돌린 뒤 재배포/재시작
    - 앱 startup 시 대상 테이블에 `NO FORCE + DISABLE ROW LEVEL SECURITY` 적용
@@ -422,7 +441,7 @@ pnpm --filter @devsecops/web build
 - **인증 제한**: API OIDC callback + 플랫폼 JWT 발급은 구현되었지만, 웹 로그인 UX/세션 처리, 키 로테이션 자동화, IdP 운영 runbook은 후속 구현 필요
 - **Tenant RLS는 opt-in preview 단계**: 기본값은 `TENANT_RLS_MODE=off`이며, `enforce`는 tenant 대상 영속화 테이블에 적용된다. queue/dead-letter/retry 운영 테이블은 서비스 전용 범위로 유지되고, startup/hydration·retention prune 경로는 `service` 컨텍스트로 동작한다.
 - **Runtime role separation guard는 opt-in hardening**: `TENANT_RLS_RUNTIME_GUARD_MODE` 기본값은 `off`, `warn`(관측), `enforce`(차단)로 단계적 적용한다.
-- **Full request-path DB direct query는 아직 진행 중**: 현재 postgres direct read 적용 범위는 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`이며, organizations list/queue/dead-letter/status 등 나머지 tenant read path는 후속 단계에서 점진 전환한다.
+- **Full request-path DB direct query는 아직 진행 중**: 현재 postgres direct read 적용 범위는 `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs`이며, queue/dead-letter/status 등 나머지 tenant read path는 후속 단계에서 점진 전환한다.
 - **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체

@@ -11,6 +11,7 @@ import {
   deletePersistedMembership,
   getActiveDataBackend,
   getPersistedOrganizationForTenant,
+  listPersistedOrganizationsForTenant,
   listPersistedMembershipsForTenant,
   persistMembershipRecord,
   persistOrganizationInviteTokenRecord,
@@ -329,6 +330,54 @@ export function listOrganizations(options: ListQueryOptions = {}): Organization[
   }
 
   return applyPagination(organizations, options);
+}
+
+/**
+ * 요청 경로 read 최적화(조직 목록):
+ * - DATA_BACKEND=postgres일 때 tenant-scoped direct query를 우선 사용
+ * - 그 외(memory 포함)는 기존 인메모리 스토어를 사용
+ */
+export async function listOrganizationsForTenantReadPath(
+  params: TenantScopedReadOptions & {
+    search?: string;
+    page?: number;
+    limit?: number;
+  }
+): Promise<Organization[]> {
+  if (getActiveDataBackend() === "postgres") {
+    const persistedOrganizations = await listPersistedOrganizationsForTenant({
+      tenantId: params.tenantId,
+      search: params.search,
+      page: params.page,
+      limit: params.limit,
+      userId: params.userId,
+      userRole: params.userRole,
+    });
+
+    if (persistedOrganizations !== null) {
+      return persistedOrganizations;
+    }
+  }
+
+  const organization = getOrganization(params.tenantId);
+  if (!organization) {
+    return [];
+  }
+
+  const normalizedSearch = normalizeSearch(params.search);
+  const scopedOrganizations = normalizedSearch
+    ? [organization].filter((item) => {
+        return (
+          item.name.toLowerCase().includes(normalizedSearch) ||
+          item.slug.toLowerCase().includes(normalizedSearch)
+        );
+      })
+    : [organization];
+
+  return applyPagination(scopedOrganizations, {
+    page: params.page,
+    limit: params.limit,
+  });
 }
 
 /**

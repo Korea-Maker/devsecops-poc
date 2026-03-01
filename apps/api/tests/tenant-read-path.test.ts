@@ -2,8 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getOrganizationForTenantReadPath,
   hydrateOrganizationStore,
+  listOrganizationsForTenantReadPath,
   listMembershipsForTenantReadPath,
 } from "../src/tenants/store.js";
+import {
+  clearTenantAuditLogs,
+  createTenantAuditLog,
+  listTenantAuditLogsForTenantReadPath,
+} from "../src/tenants/audit-log.js";
 import {
   initializeDataBackend,
   resetDataBackendForTests,
@@ -66,6 +72,7 @@ beforeEach(() => {
     memberships: [],
     inviteTokens: [],
   });
+  clearTenantAuditLogs();
 });
 
 afterEach(async () => {
@@ -86,6 +93,7 @@ afterEach(async () => {
     memberships: [],
     inviteTokens: [],
   });
+  clearTenantAuditLogs();
 
   await resetDataBackendForTests();
 });
@@ -229,6 +237,105 @@ describe("tenant read path selection", () => {
     expect(membershipReadQuery).toBeDefined();
   });
 
+  it("DATA_BACKEND=postgres면 organizations list / audit-logs read는 tenant-scoped DB direct query를 우선 사용해야 한다", async () => {
+    process.env.DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.TENANT_RLS_MODE = "shadow";
+
+    const mock = createMockSqlClient((sql, values) => {
+      if (sql.includes("FROM organizations") && sql.includes("WHERE id = $1")) {
+        const tenantId = String(values?.[0] ?? "org-db-2");
+        const searchTerm = String(values?.[1] ?? "");
+        if (!searchTerm.includes("db")) {
+          return [];
+        }
+
+        return [
+          {
+            id: tenantId,
+            name: "DB List Org",
+            slug: "db-list-org",
+            active: true,
+            created_at: "2026-03-01T02:00:00.000Z",
+            disabled_at: null,
+          },
+        ];
+      }
+
+      if (
+        sql.includes("FROM tenant_audit_logs") &&
+        sql.includes("WHERE organization_id = $1 AND organization_id = $2")
+      ) {
+        const organizationId = String(values?.[0] ?? "org-db-2");
+        const tenantId = String(values?.[1] ?? "org-db-2");
+        const actorOrTargetUserId = String(values?.[3] ?? "");
+
+        if (organizationId !== tenantId || actorOrTargetUserId !== "db-user") {
+          return [];
+        }
+
+        return [
+          {
+            id: "db-log-1",
+            organization_id: organizationId,
+            actor_user_id: "db-user",
+            action: "membership.created",
+            target_user_id: "db-user",
+            details: { source: "db-direct" },
+            created_at: "2026-03-01T02:10:00.000Z",
+          },
+        ];
+      }
+
+      return [];
+    });
+
+    await initializeDataBackend({
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      createSqlClient: () => mock.client,
+    });
+
+    const organizations = await listOrganizationsForTenantReadPath({
+      tenantId: "org-db-2",
+      search: "db",
+      page: 1,
+      limit: 5,
+      userId: "tenant-reader",
+      userRole: "member",
+    });
+
+    expect(organizations).toHaveLength(1);
+    expect(organizations[0]?.name).toBe("DB List Org");
+
+    const auditLogs = await listTenantAuditLogsForTenantReadPath({
+      organizationId: "org-db-2",
+      tenantId: "org-db-2",
+      tenantUserId: "tenant-reader",
+      userRole: "admin",
+      limit: 10,
+      action: "membership.created",
+      userId: "db-user",
+      since: "2026-03-01T00:00:00.000Z",
+      until: "2026-03-02T00:00:00.000Z",
+    });
+
+    expect(auditLogs).toHaveLength(1);
+    expect(auditLogs[0]?.id).toBe("db-log-1");
+
+    const listQuery = mock.query.mock.calls.find(
+      ([sql]) =>
+        String(sql).includes("FROM organizations") && String(sql).includes("WHERE id = $1")
+    );
+    expect(listQuery).toBeDefined();
+
+    const auditQuery = mock.query.mock.calls.find(
+      ([sql]) =>
+        String(sql).includes("FROM tenant_audit_logs") &&
+        String(sql).includes("WHERE organization_id = $1 AND organization_id = $2")
+    );
+    expect(auditQuery).toBeDefined();
+  });
+
   it("memory 백엔드에서는 기존 인메모리 read path를 유지해야 한다", async () => {
     process.env.DATA_BACKEND = "memory";
 
@@ -300,5 +407,38 @@ describe("tenant read path selection", () => {
       tenantId: "org-other",
     });
     expect(tenantMismatchMemberships).toEqual([]);
+
+    const organizations = await listOrganizationsForTenantReadPath({
+      tenantId: "org-memory-1",
+      search: "memory",
+      page: 1,
+      limit: 10,
+    });
+    expect(organizations).toHaveLength(1);
+    expect(organizations[0]?.id).toBe("org-memory-1");
+
+    createTenantAuditLog({
+      organizationId: "org-memory-1",
+      actorUserId: "memory-admin",
+      action: "membership.created",
+      targetUserId: "memory-member",
+      details: { source: "memory" },
+    });
+
+    const auditLogs = await listTenantAuditLogsForTenantReadPath({
+      organizationId: "org-memory-1",
+      tenantId: "org-memory-1",
+      userId: "memory-member",
+      limit: 5,
+      action: "membership.created",
+    });
+    expect(auditLogs).toHaveLength(1);
+
+    const tenantMismatchAuditLogs = await listTenantAuditLogsForTenantReadPath({
+      organizationId: "org-memory-1",
+      tenantId: "org-other",
+      limit: 5,
+    });
+    expect(tenantMismatchAuditLogs).toEqual([]);
   });
 });

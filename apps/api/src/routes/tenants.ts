@@ -7,6 +7,7 @@ import {
   disableOrganization,
   getOrganization,
   getOrganizationForTenantReadPath,
+  listOrganizationsForTenantReadPath,
   listMemberships,
   listMembershipsForTenantReadPath,
   listOrganizations,
@@ -17,6 +18,7 @@ import {
   createTenantAuditLog,
   isTenantAuditAction,
   listTenantAuditLogs,
+  listTenantAuditLogsForTenantReadPath,
 } from "../tenants/audit-log.js";
 import type { TenantAuditAction } from "../tenants/audit-log.js";
 import {
@@ -24,7 +26,7 @@ import {
   requireMinimumRole,
   tenantAuthOnRequest,
 } from "../tenants/auth.js";
-import type { Organization, UserRole } from "../tenants/types.js";
+import type { UserRole } from "../tenants/types.js";
 
 const VALID_USER_ROLES = ["owner", "admin", "member", "viewer"] as const;
 const VALID_USER_ROLE_SET: ReadonlySet<string> = new Set(VALID_USER_ROLES);
@@ -421,38 +423,6 @@ function parseListQuery(query: {
   };
 }
 
-function applyOrganizationSearch(
-  organizations: Organization[],
-  search: string | undefined
-): Organization[] {
-  if (!search) {
-    return organizations;
-  }
-
-  const normalizedSearch = search.toLowerCase();
-  return organizations.filter((organization) => {
-    return (
-      organization.name.toLowerCase().includes(normalizedSearch) ||
-      organization.slug.toLowerCase().includes(normalizedSearch)
-    );
-  });
-}
-
-function applyPagination<T>(
-  items: T[],
-  page: number | undefined,
-  limit: number | undefined
-): T[] {
-  if (page === undefined && limit === undefined) {
-    return items;
-  }
-
-  const normalizedPage = page ?? DEFAULT_PAGINATION_PAGE;
-  const normalizedLimit = limit ?? DEFAULT_PAGINATION_LIMIT;
-  const offset = (normalizedPage - 1) * normalizedLimit;
-  return items.slice(offset, offset + normalizedLimit);
-}
-
 function parseOptionalNonEmptyText(
   value: unknown,
   fieldName: string,
@@ -537,21 +507,16 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     }
 
     if (getTenantAuthMode() === "required") {
-      const organization = getOrganization(request.tenantContext.tenantId);
-      const scopedOrganizations = organization ? [organization] : [];
-      const searchedOrganizations = applyOrganizationSearch(
-        scopedOrganizations,
-        listQuery.options.search
-      );
-      return reply
-        .status(200)
-        .send(
-          applyPagination(
-            searchedOrganizations,
-            listQuery.options.page,
-            listQuery.options.limit
-          )
-        );
+      const organizations = await listOrganizationsForTenantReadPath({
+        tenantId: request.tenantContext.tenantId,
+        search: listQuery.options.search,
+        page: listQuery.options.page,
+        limit: listQuery.options.limit,
+        userId: request.tenantContext.userId,
+        userRole: request.tenantContext.role,
+      });
+
+      return reply.status(200).send(organizations);
     }
 
     return reply.status(200).send(listOrganizations(listQuery.options));
@@ -1023,10 +988,19 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       return sendError(reply, 400, parsedAuditQuery.error, parsedAuditQuery.code);
     }
 
-    const logs = listTenantAuditLogs({
-      organizationId: request.params.id,
-      ...parsedAuditQuery.options,
-    });
+    const logs =
+      getTenantAuthMode() === "required"
+        ? await listTenantAuditLogsForTenantReadPath({
+            organizationId: request.params.id,
+            tenantId: request.tenantContext.tenantId,
+            tenantUserId: request.tenantContext.userId,
+            userRole: request.tenantContext.role,
+            ...parsedAuditQuery.options,
+          })
+        : listTenantAuditLogs({
+            organizationId: request.params.id,
+            ...parsedAuditQuery.options,
+          });
     return reply.status(200).send(logs);
   });
 };
