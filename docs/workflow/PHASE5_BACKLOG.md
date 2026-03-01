@@ -213,7 +213,19 @@
 - [x] staging read-only RLS canary helper/배포 연동 (`infra/scripts/verify-rls-canary.sh`, `deploy-staging.yml`)
 - [x] 감사 로그 영속화/보존정책/검색 쿼리 고도화(기본 필터 + retention prune)
 - [x] staging/prod 배포 워크플로우 초안 구현 (graceful skip + post-deploy smoke contract)
-- [ ] SaaS 인프라(IaC) 실제 리소스 프로비저닝/배포 자동화 고도화
+- [x] SaaS 인프라(IaC) 실제 리소스 프로비저닝/배포 자동화 고도화 (Ops MVP Phase T)
+  - 수동 apply 워크플로우 추가: `.github/workflows/terraform-manual-apply.yml`
+    - `workflow_dispatch` only, branch restriction(main), 명시적 confirm, prod double confirm
+    - credentials/secrets 누락 시 clear abort + Step Summary 사유 출력
+  - 운영자/CI 래퍼 추가: `infra/scripts/terraform-apply-pipeline.sh`
+    - `preflight -> plan -> optional apply`를 기존 스크립트 조합으로 실행
+    - 단계별 로그/요약 아티팩트(`infra/apply-artifacts/...`) 생성
+  - `terraform-apply.sh` non-interactive 내부 모드(`--non-interactive`, `--skip-preflight`, `--skip-plan`) 확장
+  - 문서/런북 갱신: `docs/workflow/DEPLOYMENT.md`, `infra/README.md`, `infra/terraform/README.md`, `infra/terraform/OPERATOR_HANDOFF.md`
+  - 외부 선행조건(코드 외):
+    - 실제 AWS 계정/IAM 권한(OIDC role 또는 static key)
+    - Terraform remote backend(S3 + DynamoDB lock) 실계정 구성
+    - GitHub Environment reviewer/approval 정책 실제 설정
 
 ---
 

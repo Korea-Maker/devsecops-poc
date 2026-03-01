@@ -1,0 +1,259 @@
+name: Terraform Manual Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "대상 환경"
+        type: choice
+        required: true
+        default: staging
+        options:
+          - dev
+          - staging
+          - prod
+      allow_create:
+        description: "allow_resource_creation=true로 plan/apply 수행"
+        type: boolean
+        required: false
+        default: false
+      execute_apply:
+        description: "true면 apply 수행 (false면 plan-only)"
+        type: boolean
+        required: false
+        default: false
+      confirm:
+        description: "안전장치: APPLY_TERRAFORM_<ENV> (예: APPLY_TERRAFORM_STAGING)"
+        required: true
+        type: string
+      confirm_environment:
+        description: "안전장치: 선택한 환경(dev|staging|prod)을 다시 입력"
+        required: true
+        type: string
+      production_confirm:
+        description: "prod apply일 때 추가 확인값: PROD_APPLY_ACK"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-manual-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  guardrails:
+    name: Guardrails (manual dispatch validation)
+    runs-on: ubuntu-latest
+    outputs:
+      target_env: ${{ steps.validate.outputs.target_env }}
+      allow_create: ${{ steps.validate.outputs.allow_create }}
+      execute_apply: ${{ steps.validate.outputs.execute_apply }}
+    steps:
+      - name: 입력/브랜치 가드 확인
+        id: validate
+        shell: bash
+        env:
+          TARGET_ENV_INPUT: ${{ github.event.inputs.environment }}
+          ALLOW_CREATE_INPUT: ${{ github.event.inputs.allow_create }}
+          EXECUTE_APPLY_INPUT: ${{ github.event.inputs.execute_apply }}
+          CONFIRM_INPUT: ${{ github.event.inputs.confirm }}
+          CONFIRM_ENV_INPUT: ${{ github.event.inputs.confirm_environment }}
+          PROD_CONFIRM_INPUT: ${{ github.event.inputs.production_confirm }}
+        run: |
+          set -euo pipefail
+
+          abort() {
+            local reason="$1"
+            {
+              echo "### ⛔ Terraform manual apply aborted"
+              echo "$reason"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$reason" >&2
+            exit 1
+          }
+
+          target_env="${TARGET_ENV_INPUT}"
+          expected_confirm="APPLY_TERRAFORM_$(echo "$target_env" | tr '[:lower:]' '[:upper:]')"
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            abort "Branch restriction 위반: main 브랜치에서만 실행 가능합니다. (current: $GITHUB_REF)"
+          fi
+
+          if [[ "$CONFIRM_INPUT" != "$expected_confirm" ]]; then
+            abort "confirm 입력이 올바르지 않습니다. expected=${expected_confirm}"
+          fi
+
+          if [[ "$CONFIRM_ENV_INPUT" != "$target_env" ]]; then
+            abort "confirm_environment 입력이 선택 환경과 일치하지 않습니다. selected=${target_env}, input=${CONFIRM_ENV_INPUT}"
+          fi
+
+          if [[ "$target_env" == "prod" && "$EXECUTE_APPLY_INPUT" == "true" ]]; then
+            if [[ "$PROD_CONFIRM_INPUT" != "PROD_APPLY_ACK" ]]; then
+              abort "production apply는 production_confirm=PROD_APPLY_ACK 추가 확인이 필요합니다."
+            fi
+          fi
+
+          echo "target_env=${target_env}" >> "$GITHUB_OUTPUT"
+          echo "allow_create=${ALLOW_CREATE_INPUT}" >> "$GITHUB_OUTPUT"
+          echo "execute_apply=${EXECUTE_APPLY_INPUT}" >> "$GITHUB_OUTPUT"
+
+  terraform-manual-pipeline:
+    name: Terraform preflight/plan/apply (manual)
+    runs-on: ubuntu-latest
+    needs:
+      - guardrails
+    environment:
+      name: ${{ needs.guardrails.outputs.target_env }}
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Terraform 설치
+        uses: hashicorp/setup-terraform@v3
+
+      - name: AWS credential/secrets preflight
+        id: aws_preflight
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          AWS_REGION_OVERRIDE: ${{ vars.TERRAFORM_AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          auth_mode=""
+
+          if [[ -n "${AWS_ROLE_TO_ASSUME:-}" ]]; then
+            auth_mode="role"
+          elif [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+            auth_mode="static"
+          else
+            missing+=("secret AWS_ROLE_TO_ASSUME (OIDC) 또는 AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY")
+          fi
+
+          tfvars_file="infra/terraform/environments/${{ needs.guardrails.outputs.target_env }}.tfvars"
+          if [[ ! -f "$tfvars_file" ]]; then
+            missing+=("tfvars file ${tfvars_file}")
+          fi
+
+          aws_region="${AWS_REGION_OVERRIDE:-}"
+          if [[ -z "$aws_region" && -f "$tfvars_file" ]]; then
+            aws_region="$(awk -F '=' '
+              /^[[:space:]]*aws_region[[:space:]]*=/ {
+                value=$2
+                gsub(/[[:space:]"]/, "", value)
+                print value
+                exit
+              }
+            ' "$tfvars_file")"
+          fi
+
+          if [[ -z "$aws_region" ]]; then
+            missing+=("variable TERRAFORM_AWS_REGION 또는 tfvars 내 aws_region")
+          fi
+
+          if (( ${#missing[@]} > 0 )); then
+            reason="Terraform apply preflight 실패: ${missing[*]}"
+            {
+              echo "### ⛔ Terraform credentials preflight failed"
+              echo "$reason"
+              echo ""
+              echo "필수 secret/variable 설정 후 다시 실행하세요."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$reason" >&2
+            exit 1
+          fi
+
+          echo "auth_mode=${auth_mode}" >> "$GITHUB_OUTPUT"
+          echo "aws_region=${aws_region}" >> "$GITHUB_OUTPUT"
+
+      - name: AWS OIDC role 구성
+        if: steps.aws_preflight.outputs.auth_mode == 'role'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ steps.aws_preflight.outputs.aws_region }}
+          role-session-name: gha-terraform-manual-apply
+
+      - name: AWS static credentials 구성
+        if: steps.aws_preflight.outputs.auth_mode == 'static'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ steps.aws_preflight.outputs.aws_region }}
+
+      - name: Terraform apply pipeline 실행
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          args=("${{ needs.guardrails.outputs.target_env }}" "--ci")
+
+          if [[ "${{ needs.guardrails.outputs.allow_create }}" == "true" ]]; then
+            args+=("--allow-create")
+          fi
+
+          if [[ "${{ needs.guardrails.outputs.execute_apply }}" == "true" ]]; then
+            args+=("--apply")
+
+            if [[ "${{ needs.guardrails.outputs.target_env }}" == "prod" ]]; then
+              args+=("--allow-prod")
+            fi
+          fi
+
+          set +e
+          bash infra/scripts/terraform-apply-pipeline.sh "${args[@]}" | tee /tmp/terraform-apply-pipeline.log
+          pipeline_exit="${PIPESTATUS[0]}"
+          set -e
+
+          artifact_dir="$(grep '^ARTIFACT_DIR=' /tmp/terraform-apply-pipeline.log | tail -n 1 | cut -d= -f2-)"
+          overall_status="$(grep '^OVERALL_STATUS=' /tmp/terraform-apply-pipeline.log | tail -n 1 | cut -d= -f2-)"
+          apply_requested="$(grep '^APPLY_REQUESTED=' /tmp/terraform-apply-pipeline.log | tail -n 1 | cut -d= -f2-)"
+          apply_executed="$(grep '^APPLY_EXECUTED=' /tmp/terraform-apply-pipeline.log | tail -n 1 | cut -d= -f2-)"
+
+          if [[ -z "$artifact_dir" ]]; then
+            artifact_dir="infra/apply-artifacts"
+          fi
+
+          echo "artifact_dir=${artifact_dir}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=terraform-manual-$(basename "$artifact_dir")" >> "$GITHUB_OUTPUT"
+          echo "overall_status=${overall_status:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "apply_requested=${apply_requested:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "apply_executed=${apply_executed:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "pipeline_exit=${pipeline_exit}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$pipeline_exit" -ne 0 ]]; then
+            exit "$pipeline_exit"
+          fi
+
+      - name: Apply pipeline artifact 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.run.outputs.artifact_name }}
+          path: ${{ steps.run.outputs.artifact_dir }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Terraform manual pipeline"
+            echo "- environment: \`${{ needs.guardrails.outputs.target_env }}\`"
+            echo "- allow_create: \`${{ needs.guardrails.outputs.allow_create }}\`"
+            echo "- apply requested: **${{ steps.run.outputs.apply_requested }}**"
+            echo "- apply executed: **${{ steps.run.outputs.apply_executed }}**"
+            echo "- overall status: **${{ steps.run.outputs.overall_status }}**"
+            echo "- artifact: \`${{ steps.run.outputs.artifact_dir }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

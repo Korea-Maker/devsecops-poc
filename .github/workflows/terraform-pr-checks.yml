@@ -8,6 +8,7 @@ on:
       - "infra/terraform/**"
       - "infra/scripts/terraform-*.sh"
       - ".github/workflows/terraform-pr-checks.yml"
+      - ".github/workflows/terraform-manual-apply.yml"
 
 permissions:
   contents: read

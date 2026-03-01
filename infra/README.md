@@ -157,7 +157,7 @@ infra/terraform/
 └── plans/                        # 로컬 plan 출력 경로 (git ignore)
 ```
 
-### 현재 구현 범위 (Ops MVP Phase O)
+### 현재 구현 범위 (Ops MVP Phase O + T)
 
 - `vpc/rds/ecs/s3` 모듈 최소 리소스 skeleton 추가
 - 모든 모듈은 `enabled=false` 기본값(비활성)
@@ -166,6 +166,13 @@ infra/terraform/
 - tfvars 샘플(dev/staging/prod) + 환경 템플릿(dev/staging/prod) 추가
 - preflight validator(`infra/scripts/terraform-preflight-validate.sh`) 추가
 - rehearsal artifact generator(`infra/scripts/terraform-rehearsal-artifacts.sh`) + 운영자 handoff 문서 추가
+- apply pipeline wrapper(`infra/scripts/terraform-apply-pipeline.sh`) 추가
+  - 기존 스크립트(`preflight`, `plan`, `apply`)를 조합해 `preflight -> plan -> optional apply` 수행
+  - 단계별 로그/상태 요약 아티팩트 생성(`infra/apply-artifacts/...`)
+- 수동 apply 워크플로우(`.github/workflows/terraform-manual-apply.yml`) 추가
+  - `workflow_dispatch` only (push/PR 자동 apply 없음)
+  - branch restriction(`main`), 환경 선택, 명시적 confirm, prod double confirm
+  - credentials/secrets 미구성 시 명확한 사유로 즉시 중단
 
 ### Terraform 실행 플로우 (정확한 절차)
 
@@ -184,17 +191,43 @@ bash infra/scripts/terraform-preflight-validate.sh staging
 # 3) 안전 모드 plan (기본: 리소스 생성 없음)
 bash infra/scripts/terraform-plan.sh staging
 
-# 4) 생성 포함 plan (명시적 --allow-create 필요)
-bash infra/scripts/terraform-plan.sh staging --allow-create
+# 4) 운영자/CI 래퍼(plan-only)
+bash infra/scripts/terraform-apply-pipeline.sh staging --allow-create
 
-# 5) apply (대화형 확인)
-bash infra/scripts/terraform-apply.sh staging --allow-create
+# 5) 생성 포함 apply (명시적 --apply)
+bash infra/scripts/terraform-apply-pipeline.sh staging --allow-create --apply
 
 # 6) prod apply (추가 보호장치)
-bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
+bash infra/scripts/terraform-apply-pipeline.sh prod --allow-create --apply --allow-prod
 ```
 
-> CI에서는 apply를 절대 실행하지 않고, PR에서 fmt/validate/plan(안전 모드)만 수행한다.
+GitHub에서 첫 실 프로비저닝을 수행할 때는 아래 순서를 권장:
+
+1. `Terraform Manual Apply` 워크플로우를 `staging` + plan-only로 먼저 실행
+2. 결과 아티팩트(`status-summary.md`, `status.json`, `logs/*`) 검토
+3. `staging` apply 실행
+4. 동일 절차를 `prod` plan-only → `prod` apply 순으로 진행
+
+> 자동 경로(push/PR)에서는 apply를 절대 실행하지 않고, PR에서는 fmt/validate/plan(안전 모드)만 수행한다.
+
+### GitHub 환경 보호/시크릿 체크리스트
+
+- Environments: `dev`, `staging`, `prod`
+- 보호 규칙:
+  - `staging` required reviewer >= 1
+  - `prod` required reviewer >= 2 (+ wait timer 권장)
+  - deployment branch: `main`
+- Terraform apply 인증 시크릿(택1):
+  - `AWS_ROLE_TO_ASSUME`(OIDC)
+  - 또는 `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
+- 선택: `AWS_SESSION_TOKEN`, `TERRAFORM_AWS_REGION`
+
+### 아직 외부에서 필요한 선행조건
+
+- 실제 AWS 계정/결제/조직 정책 준비
+- Terraform 실행 IAM 권한 및 신뢰 정책 구성
+- remote backend(S3 + DynamoDB lock) 실계정 리소스 준비
+- GitHub 환경 승인 정책(리뷰어/승인 절차) 운영 확정
 
 
 ---

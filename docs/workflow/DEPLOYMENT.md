@@ -216,8 +216,15 @@ aws ecs describe-services \
   - 트리거: 수동 실행(`workflow_dispatch`)
   - `infra/scripts/terraform-rehearsal-artifacts.sh`로 dry-run 리허설 번들 생성
   - terraform/aws 준비가 없어도 skip-safe로 종료 + artifact 업로드
+- `terraform-manual-apply.yml`:
+  - 트리거: `workflow_dispatch`만 허용 (push/PR 자동 apply 없음)
+  - 입력 가드: `confirm`, `confirm_environment`, prod `production_confirm`
+  - 브랜치 가드: `main` 외 실행 즉시 중단
+  - 환경 가드: GitHub Environment(`dev|staging|prod`) 승인/보호 규칙 연동
+  - 실행: `infra/scripts/terraform-apply-pipeline.sh` (preflight -> plan -> optional apply)
+  - 아티팩트 업로드: `infra/apply-artifacts/<timestamp>-<env>`
 
-### 배포 계약 (GitHub repository level)
+### 배포 계약 (GitHub repository/environment level)
 
 - Staging
   - required secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
@@ -227,6 +234,18 @@ aws ecs describe-services \
 - Production
   - secrets: `PRODUCTION_DEPLOY_WEBHOOK_URL`, `PRODUCTION_DEPLOY_WEBHOOK_TOKEN`
   - variables: `PRODUCTION_SMOKE_API_HEALTH_URL`, `PRODUCTION_SMOKE_WEB_HEALTH_URL`
+
+- Terraform manual apply (권장: environment-level secret/approval)
+  - GitHub environments: `dev`, `staging`, `prod`
+  - 권장 보호 규칙:
+    - `staging`: required reviewer >= 1
+    - `prod`: required reviewer >= 2 + wait timer(권장)
+    - deployment branch: `main` only
+  - required auth secrets (둘 중 하나):
+    - `AWS_ROLE_TO_ASSUME` (OIDC 권장)
+    - `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (static)
+  - optional secret: `AWS_SESSION_TOKEN`
+  - optional variable: `TERRAFORM_AWS_REGION` (미설정 시 tfvars의 `aws_region` 사용)
 
 - Smoke 스크립트 계약: `infra/scripts/post-deploy-smoke-check.sh`
   - required: `SMOKE_API_HEALTH_URL`, `SMOKE_WEB_HEALTH_URL`
@@ -241,11 +260,12 @@ aws ecs describe-services \
   - `infra/scripts/terraform-preflight-validate.sh <env|all>`: tfvars + template 완전성 검증
   - `infra/scripts/terraform-plan.sh <env>`: `dev|staging|prod` 환경 인자 필수 (preflight 자동 실행)
   - `infra/scripts/terraform-plan.sh <env> --allow-create`: 명시적으로 create plan 허용
-  - `infra/scripts/terraform-apply.sh <env>`: preflight + apply 전 대화형 확인
-  - `infra/scripts/terraform-apply.sh prod ...`: `--allow-prod` 없으면 즉시 거부
+  - `infra/scripts/terraform-apply.sh <env>`: preflight + plan + apply 가드(기본 대화형)
+  - `infra/scripts/terraform-apply.sh --non-interactive ...`: CI/internal wrapper 전용 토큰 가드
+  - `infra/scripts/terraform-apply-pipeline.sh <env>`: preflight -> plan -> optional apply 래퍼 + 로그/요약 아티팩트 생성
   - `infra/scripts/terraform-rehearsal-artifacts.sh <env>`: dry-run 리허설 아티팩트 번들 생성
   - 리허설 런북: `infra/terraform/DRY_RUN_REHEARSAL_CHECKLIST.md`
-  - 운영자 핸드오프: `infra/terraform/OPERATOR_HANDOFF.md`
+  - 운영자 핸드오프/실프로비저닝 런북: `infra/terraform/OPERATOR_HANDOFF.md`
 
 
 ### Terraform IaC 실행 절차 (safe-by-default)
@@ -262,15 +282,25 @@ bash infra/scripts/terraform-preflight-validate.sh staging
 # 3) 안전 모드 plan (기본)
 bash infra/scripts/terraform-plan.sh staging
 
-# 4) 생성 포함 plan/apply (명시적으로만)
-bash infra/scripts/terraform-plan.sh staging --allow-create
-bash infra/scripts/terraform-apply.sh staging --allow-create
+# 4) 운영자 래퍼(plan-only)
+bash infra/scripts/terraform-apply-pipeline.sh staging --allow-create
 
-# 5) production apply (추가 플래그 + 확인 문자열)
-bash infra/scripts/terraform-apply.sh prod --allow-prod --allow-create
+# 5) 생성 포함 apply (명시적으로만)
+bash infra/scripts/terraform-apply-pipeline.sh staging --allow-create --apply
+
+# 6) production apply (추가 플래그 + 수동 승인)
+bash infra/scripts/terraform-apply-pipeline.sh prod --allow-create --apply --allow-prod
 ```
 
-> CI에서는 apply를 실행하지 않고, PR에서 fmt/validate/plan(안전 모드)만 수행한다.
+GitHub 실행(권장):
+
+1. Actions → `Terraform Manual Apply` 선택
+2. `environment`, `allow_create`, `execute_apply` 입력
+3. `confirm=APPLY_TERRAFORM_<ENV>` + `confirm_environment=<env>` 입력
+4. prod apply 시 `production_confirm=PROD_APPLY_ACK` 추가
+5. Environment approval 후 artifact(`infra/apply-artifacts/...`) 확인
+
+> 자동 경로(push/PR)에서는 apply가 절대 실행되지 않는다.
 
 ### 운영/실서비스 MVP complete 판정 조건 (현재)
 
