@@ -1,0 +1,198 @@
+name: 'DevSecOps Security Scan'
+description: 'Semgrep + Trivy + Gitleaks 통합 보안 스캔 Composite Action'
+
+inputs:
+  github-token:
+    description: 'GitHub API 인증 토큰'
+    required: true
+  fail-threshold:
+    description: '차단 기준 (critical | high | medium | none)'
+    required: false
+    default: 'critical'
+  engines:
+    description: '실행할 엔진 목록 (쉼표 구분)'
+    required: false
+    default: 'semgrep,trivy,gitleaks'
+  semgrep-config:
+    description: 'semgrep 설정'
+    required: false
+    default: 'auto'
+
+outputs:
+  total-findings:
+    description: '전체 발견 건수'
+    value: ${{ steps.parse.outputs.total-findings }}
+  critical-count:
+    description: 'Critical 심각도 발견 건수'
+    value: ${{ steps.parse.outputs.critical-count }}
+  high-count:
+    description: 'High 심각도 발견 건수'
+    value: ${{ steps.parse.outputs.high-count }}
+  medium-count:
+    description: 'Medium 심각도 발견 건수'
+    value: ${{ steps.parse.outputs.medium-count }}
+  low-count:
+    description: 'Low 심각도 발견 건수'
+    value: ${{ steps.parse.outputs.low-count }}
+  comment-url:
+    description: 'PR 코멘트 URL'
+    value: ${{ steps.pr-comment.outputs.comment-url }}
+  blocked:
+    description: 'threshold 기준 차단 여부 (true | false)'
+    value: ${{ steps.parse.outputs.blocked }}
+
+runs:
+  using: composite
+  steps:
+    - name: '보안 스캔 도구 설치'
+      shell: bash
+      env:
+        ENGINES: ${{ inputs.engines }}
+      run: |
+        set -euo pipefail
+        echo "::group::보안 스캔 도구 설치"
+
+        if echo "$ENGINES" | tr ',' '\n' | grep -qx "semgrep"; then
+          echo "--- semgrep 설치 중 ---"
+          pipx install semgrep
+        fi
+
+        if echo "$ENGINES" | tr ',' '\n' | grep -qx "trivy"; then
+          echo "--- trivy 설치 중 ---"
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        fi
+
+        if echo "$ENGINES" | tr ',' '\n' | grep -qx "gitleaks"; then
+          echo "--- gitleaks 설치 중 ---"
+          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          mv gitleaks /usr/local/bin/gitleaks
+          rm gitleaks.tar.gz
+        fi
+        echo "::endgroup::"
+
+    - name: 'Semgrep SAST 스캔 실행'
+      shell: bash
+      env:
+        ENGINES: ${{ inputs.engines }}
+        SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
+      run: |
+        set -uo pipefail
+        echo "::group::Semgrep SAST 스캔"
+        if echo "$ENGINES" | tr ',' '\n' | grep -qx "semgrep"; then
+          semgrep scan --config "$SEMGREP_CONFIG" --json --output semgrep-results.json . ; SCAN_EXIT=$?
+          if [ $SCAN_EXIT -ne 0 ] && [ ! -s semgrep-results.json ]; then
+            echo "::error::semgrep 실행 자체가 실패했습니다 (exit $SCAN_EXIT)"
+            exit 1
+          fi
+        else
+          echo "semgrep 엔진이 비활성화되어 있습니다. 건너뜁니다."
+          echo '{"results":[]}' > semgrep-results.json
+        fi
+        echo "::endgroup::"
+
+    - name: 'Trivy SCA 스캔 실행'
+      shell: bash
+      env:
+        ENGINES: ${{ inputs.engines }}
+      run: |
+        set -uo pipefail
+        echo "::group::Trivy SCA 스캔"
+        if echo "$ENGINES" | tr ',' '\n' | grep -qx "trivy"; then
+          trivy fs --format json --output trivy-results.json . ; SCAN_EXIT=$?
+          if [ $SCAN_EXIT -ne 0 ] && [ ! -s trivy-results.json ]; then
+            echo "::error::trivy 실행 자체가 실패했습니다 (exit $SCAN_EXIT)"
+            exit 1
+          fi
+        else
+          echo "trivy 엔진이 비활성화되어 있습니다. 건너뜁니다."
+          echo '{"Results":[]}' > trivy-results.json
+        fi
+        echo "::endgroup::"
+
+    - name: 'Gitleaks 시크릿 스캔 실행'
+      shell: bash
+      env:
+        ENGINES: ${{ inputs.engines }}
+      run: |
+        set -uo pipefail
+        echo "::group::Gitleaks 시크릿 스캔"
+        if echo "$ENGINES" | tr ',' '\n' | grep -qx "gitleaks"; then
+          gitleaks detect --source . --report-format json --report-path gitleaks-results.json ; SCAN_EXIT=$?
+          if [ $SCAN_EXIT -ne 0 ] && [ ! -s gitleaks-results.json ]; then
+            echo "::error::gitleaks 실행 자체가 실패했습니다 (exit $SCAN_EXIT)"
+            exit 1
+          fi
+        else
+          echo "gitleaks 엔진이 비활성화되어 있습니다. 건너뜁니다."
+          echo '[]' > gitleaks-results.json
+        fi
+        echo "::endgroup::"
+
+    - name: '스캔 결과 파싱 및 집계'
+      id: parse
+      shell: bash
+      env:
+        FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
+        ENGINES: ${{ inputs.engines }}
+      run: |
+        echo "::group::스캔 결과 파싱"
+        ${{ github.action_path }}/parse-results.sh
+        echo "::endgroup::"
+
+    - name: 'PR 코멘트 작성'
+      id: pr-comment
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+        echo "::group::PR 코멘트 작성"
+        PR_NUMBER=$(gh pr view --json number -q '.number' 2>/dev/null || echo "")
+        if [ -n "$PR_NUMBER" ]; then
+          MARKER="<!-- devsecops-security-scan -->"
+          EXISTING=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" 2>/dev/null | tail -1)
+          if [ -n "$EXISTING" ]; then
+            COMMENT_URL=$(gh api "repos/${GH_REPO}/issues/comments/${EXISTING}" -X PATCH -F body=@comment-body.md --jq '.html_url' 2>/dev/null || echo "")
+          else
+            COMMENT_URL=$(gh pr comment "${PR_NUMBER}" --body-file comment-body.md --json url --jq '.url' 2>/dev/null || echo "")
+          fi
+          echo "comment-url=${COMMENT_URL}" >> "$GITHUB_OUTPUT"
+        else
+          echo "PR 컨텍스트가 없습니다. 코멘트 작성을 건너뜁니다."
+          echo "comment-url=" >> "$GITHUB_OUTPUT"
+        fi
+        echo "::endgroup::"
+
+    - name: '스캔 결과 아티팩트 업로드'
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-scan-results
+        path: |
+          semgrep-results.json
+          trivy-results.json
+          gitleaks-results.json
+          comment-body.md
+        if-no-files-found: warn
+
+    - name: 'Threshold 판정 및 빌드 차단'
+      shell: bash
+      env:
+        BLOCKED: ${{ steps.parse.outputs.blocked }}
+        THRESHOLD: ${{ inputs.fail-threshold }}
+      run: |
+        set -euo pipefail
+        echo "::group::Threshold 판정"
+        echo "차단 기준: ${THRESHOLD}"
+        echo "차단 여부: ${BLOCKED}"
+        if [ "${BLOCKED}" = "true" ]; then
+          echo "::error::보안 스캔 결과가 차단 기준(${THRESHOLD})을 초과하여 빌드를 중단합니다."
+          exit 1
+        else
+          echo "보안 스캔 통과: 차단 기준(${THRESHOLD})을 초과하는 발견 사항 없음."
+        fi
+        echo "::endgroup::"

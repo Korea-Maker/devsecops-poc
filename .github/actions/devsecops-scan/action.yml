@@ -1,8 +1,8 @@
 # DevSecOps PoC 보안 스캔 트리거 Composite Action
 # - POST /api/v1/scans 로 스캔을 생성하고 완료될 때까지 폴링한다
 # - 완료 후 findings 요약을 GITHUB_STEP_SUMMARY에 출력한다
-name: DevSecOps Security Scan
-description: "DevSecOps PoC API에 보안 스캔을 트리거하고 결과를 대기합니다."
+name: "[DEPRECATED] DevSecOps Security Scan"
+description: "[DEPRECATED - .github/actions/security-scan 으로 전환하세요] DevSecOps PoC API에 보안 스캔을 트리거하고 결과를 대기합니다."
 
 inputs:
   api-url:
