@@ -269,7 +269,7 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 
 **GitHub Actions 워크플로우:**
 - `.github/workflows/ci.yml`: 모든 push/PR 시 린트/타입체크/테스트/빌드 실행
-- `.github/workflows/security-scan.yml`: PR 시 semgrep/trivy/gitleaks 병렬 스캔
+- `.github/workflows/security-scan.yml`: PR 시 재사용 가능한 Composite Action으로 semgrep/trivy/gitleaks 통합 스캔
 - `.github/workflows/deploy-staging.yml`: main push(및 수동 실행) 기준 staging 배포
   - verify 단계에서 API test/typecheck/build + Web typecheck/build 선검증
   - preflight에서 필수 secret/variable 누락 시 **실패 대신 skip** + Step Summary 안내
@@ -287,10 +287,15 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 - `.github/workflows/terraform-rehearsal-dry-run.yml`: Terraform dry-run 리허설(수동)
   - 트리거: `workflow_dispatch`
   - `infra/scripts/terraform-rehearsal-artifacts.sh` 실행 + 결과 artifact 업로드
-- `.github/actions/devsecops-scan/action.yml`: Composite Action
-  - 스캔 생성 (POST /api/v1/scans)
-  - 폴링으로 완료 대기 (최대 5분, 10초 간격)
-  - 결과를 GitHub Step Summary에 출력
+- `.github/actions/security-scan/`: 재사용 가능한 보안 스캔 Composite Action
+  - semgrep(SAST) + trivy(SCA) + gitleaks(Secret) 3개 엔진 통합 실행
+  - JSON 결과 파싱 → PR Comment 마커 기반 upsert (중복 방지)
+  - 설정 가능한 차단 기준 (`fail-threshold`: critical/high/medium/none)
+  - 외부 레포에서 `uses: org/repo/.github/actions/security-scan@main`으로 재사용 가능
+  - command injection 방지: 모든 inputs `env:` 매핑
+  - 상세 사용법: `.github/actions/security-scan/README.md` 참조
+- `.github/actions/devsecops-scan/action.yml`: [DEPRECATED] API 기반 Composite Action
+  - `.github/actions/security-scan/`으로 전환 권장
 
 **배포 워크플로우 시크릿/변수 계약:**
 - Staging
@@ -451,7 +456,7 @@ pnpm --filter @devsecops/web build
 - **Runtime role separation guard는 opt-in hardening**: `TENANT_RLS_RUNTIME_GUARD_MODE` 기본값은 `off`, `warn`(관측), `enforce`(차단)로 단계적 적용한다.
 - **request-path DB direct read 범위(tenant read endpoint 기준)는 전환 완료**: `GET /api/v1/scans`, `GET /api/v1/scans/:id`, `GET /api/v1/scans/queue/status`, `GET /api/v1/scans/dead-letters`, `GET /api/v1/organizations`, `GET /api/v1/organizations/:id`, `GET /api/v1/organizations/:id/memberships`, `GET /api/v1/organizations/:id/audit-logs`
 - **queue write path는 현재 의도적으로 인메모리 워커 semantics 유지**: `POST /api/v1/scans/queue/process-next`, `POST /api/v1/scans/:id/redrive`는 in-flight 처리/타이머 materialize와 강하게 결합되어 있어 단순 DB 전환이 어렵다. 최소 다음 단계는 DB 기반 worker lease(또는 분산 락) 도입 후 write-path를 단계 전환하는 것이다.
-- **GitHub App 미연동**: Check Run 생성, PR 댓글 등 GitHub API 기능 미구현 (Mock 모드, 향후 예정)
+- **GitHub App 미연동**: Check Run 생성 등 GitHub API 기능 미구현 (PR Comment는 Composite Action으로 구현 완료)
 - **클라이언트 필터링**: 엔진 필터와 검색은 클라이언트사이드 처리 — 대량 데이터 시 성능 저하 가능
 - **PDF 미지원**: 직접 PDF 생성 불가 — 브라우저 `Ctrl+P` 인쇄 기능으로 대체
 
