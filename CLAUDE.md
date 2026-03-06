@@ -157,7 +157,9 @@ Next.js 15 App Router. `next.config.ts`에서 `/api/*` 요청을 `localhost:3001
 
 ## 참고 문서
 
-- `README.md` — 전체 구현 상태, API 계약, 환경변수 목록
+- `README.md` — 프로젝트 소개, 빠른 시작, GitHub Actions 설정
+- `docs/API.md` — API 라우트, 인증 계약, 오류 코드, 워커 동작
+- `docs/CONFIGURATION.md` — 전체 환경변수 목록
 - `docs/workflow/DECISIONS.md` — 확정 의사결정/리스크
 - `docs/architecture/AUTH_TRANSITION.md` — Header → JWT/OAuth 전환 경계/신뢰모델
 - `docs/architecture/TENANT_RLS_ROLLOUT.md` — PostgreSQL Tenant RLS 단계적 도입 설계
