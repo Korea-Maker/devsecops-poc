@@ -157,7 +157,9 @@ describe("Scanner adapters (native mode boundary)", () => {
     }
   );
 
-  it.each(nativeCases)(
+  // createMockBinary는 Unix shell 스크립트를 생성하므로
+  // Windows의 execFile은 shebang을 지원하지 않아 실행 불가
+  (process.platform === "win32" ? it.skip : it).each(nativeCases)(
     "native 모드에서 $engine 결과 형식이 깨지면 엔진명 포함 형식 오류를 던져야 한다",
     async ({ engine, command, createAdapter, malformedOutput }) => {
       process.env.PATH = createMockBinary(command, malformedOutput);

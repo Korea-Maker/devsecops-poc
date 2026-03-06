@@ -297,7 +297,40 @@ curl -s -X POST http://localhost:3001/api/v1/scans/queue/process-next
 - `.github/actions/devsecops-scan/action.yml`: [DEPRECATED] API 기반 Composite Action
   - `.github/actions/security-scan/`으로 전환 권장
 
-**배포 워크플로우 시크릿/변수 계약:**
+**GitHub Actions 설정 가이드:**
+
+> 모든 워크플로우는 **graceful skip** 패턴으로 구현되어 있다. secrets/variables가 없으면 배포 단계만 스킵하고 워크플로우 자체는 실패하지 않는다.
+
+**1단계: 설정 없이 바로 동작** — push/PR만 하면 CI + Security Scan이 자동 실행된다.
+
+| 워크플로우 | 트리거 | secrets 필요 |
+|---|---|---|
+| CI (`ci.yml`) | push/PR → main | 없음 |
+| Security Scan (`security-scan.yml`) | PR → main | 없음 (`GITHUB_TOKEN` 자동 제공) |
+| Terraform PR Checks (`terraform-pr-checks.yml`) | PR (infra 변경) | 없음 (AWS creds 없으면 plan만 스킵) |
+
+**2단계: 배포 활성화** — GitHub 리포지토리 **Settings → Secrets and variables → Actions**에서 설정한다.
+
+| 환경 | 종류 | 이름 | 설명 |
+|---|---|---|---|
+| Staging | Secret | `STAGING_DEPLOY_WEBHOOK_URL` | 배포 트리거 웹훅 URL |
+| Staging | Secret | `STAGING_DEPLOY_WEBHOOK_TOKEN` | 웹훅 인증 Bearer 토큰 |
+| Staging | Variable | `STAGING_SMOKE_API_HEALTH_URL` | 예: `https://api-staging.example.com/health` |
+| Staging | Variable | `STAGING_SMOKE_WEB_HEALTH_URL` | 예: `https://staging.example.com` |
+| Production | Secret | `PRODUCTION_DEPLOY_WEBHOOK_URL` | 배포 트리거 웹훅 URL |
+| Production | Secret | `PRODUCTION_DEPLOY_WEBHOOK_TOKEN` | 웹훅 인증 Bearer 토큰 |
+| Production | Variable | `PRODUCTION_SMOKE_API_HEALTH_URL` | 예: `https://api.example.com/health` |
+| Production | Variable | `PRODUCTION_SMOKE_WEB_HEALTH_URL` | 예: `https://example.com` |
+
+**3단계 (선택): Terraform AWS 인증** — Terraform plan/apply에 필요하다.
+
+| 종류 | 이름 | 설명 |
+|---|---|---|
+| Secret | `AWS_ROLE_TO_ASSUME` | OIDC 방식 (권장) |
+| Secret | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | Static 방식 (대안) |
+| Secret | `AWS_SESSION_TOKEN` | 임시 자격증명 사용 시 (선택) |
+
+**배포 워크플로우 시크릿/변수 계약 (상세):**
 - Staging
   - required secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
   - required variables: `STAGING_SMOKE_API_HEALTH_URL`, `STAGING_SMOKE_WEB_HEALTH_URL`

@@ -224,7 +224,42 @@ aws ecs describe-services \
   - 실행: `infra/scripts/terraform-apply-pipeline.sh` (preflight -> plan -> optional apply)
   - 아티팩트 업로드: `infra/apply-artifacts/<timestamp>-<env>`
 
-### 배포 계약 (GitHub repository/environment level)
+### GitHub Actions 빠른 시작
+
+> 모든 워크플로우는 graceful skip 패턴으로 구현되어 있다. secrets/variables가 없으면 배포 단계만 스킵하고 워크플로우 자체는 실패하지 않는다.
+
+**설정 없이 바로 동작하는 워크플로우:**
+
+| 워크플로우 | 트리거 | secrets 필요 |
+|---|---|---|
+| CI (`ci.yml`) | push/PR → main | 없음 |
+| Security Scan (`security-scan.yml`) | PR → main | 없음 (`GITHUB_TOKEN` 자동 제공) |
+| Terraform PR Checks | PR (infra 변경) | 없음 (AWS creds 없으면 plan만 스킵) |
+
+**배포 활성화를 위한 설정:**
+
+GitHub 리포지토리 **Settings → Secrets and variables → Actions**에서 아래 값을 추가한다.
+
+| 환경 | 종류 | 이름 | 설명 |
+|---|---|---|---|
+| Staging | Secret | `STAGING_DEPLOY_WEBHOOK_URL` | 배포 트리거 웹훅 URL |
+| Staging | Secret | `STAGING_DEPLOY_WEBHOOK_TOKEN` | 웹훅 인증 Bearer 토큰 |
+| Staging | Variable | `STAGING_SMOKE_API_HEALTH_URL` | 예: `https://api-staging.example.com/health` |
+| Staging | Variable | `STAGING_SMOKE_WEB_HEALTH_URL` | 예: `https://staging.example.com` |
+| Production | Secret | `PRODUCTION_DEPLOY_WEBHOOK_URL` | 배포 트리거 웹훅 URL |
+| Production | Secret | `PRODUCTION_DEPLOY_WEBHOOK_TOKEN` | 웹훅 인증 Bearer 토큰 |
+| Production | Variable | `PRODUCTION_SMOKE_API_HEALTH_URL` | 예: `https://api.example.com/health` |
+| Production | Variable | `PRODUCTION_SMOKE_WEB_HEALTH_URL` | 예: `https://example.com` |
+
+**Terraform AWS 인증 (선택):**
+
+| 종류 | 이름 | 설명 |
+|---|---|---|
+| Secret | `AWS_ROLE_TO_ASSUME` | OIDC 방식 (권장) |
+| Secret | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | Static 방식 (대안) |
+| Secret | `AWS_SESSION_TOKEN` | 임시 자격증명 사용 시 (선택) |
+
+### 배포 계약 (GitHub repository/environment level, 상세)
 
 - Staging
   - required secrets: `STAGING_DEPLOY_WEBHOOK_URL`, `STAGING_DEPLOY_WEBHOOK_TOKEN`
