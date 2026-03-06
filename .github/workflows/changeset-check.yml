@@ -1,0 +1,96 @@
+# Changeset 확인 - PR에 changeset 파일이 포함되었는지 확인하고 경고
+name: Changeset Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  PNPM_VERSION: "9"
+  NODE_VERSION: "20"
+
+jobs:
+  changeset-check:
+    name: Changeset 확인
+    runs-on: ubuntu-latest
+    steps:
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: pnpm 설치
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Node.js 설정 (pnpm 스토어 캐시 포함)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      - name: Changeset 포함 여부 확인
+        id: changeset-check
+        continue-on-error: true
+        run: |
+          if pnpm changeset status 2>&1 | grep -q "No changesets present"; then
+            echo "has_changeset=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changeset=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Changeset 미포함 경고 코멘트
+        if: steps.changeset-check.outputs.has_changeset == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = '<!-- changeset-check-bot -->';
+            const body = `${marker}\n> **ℹ️ Changeset 미포함**\n>\n> 이 PR에 changeset이 포함되어 있지 않습니다.\n> 릴리즈 노트에 반영하려면 \`pnpm changeset\`을 실행하세요.\n>\n> changeset이 필요 없는 변경(docs, CI 등)이라면 이 메시지를 무시해도 됩니다.`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(marker));
+            if (!existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: 기존 경고 코멘트 삭제 (changeset 포함 시)
+        if: steps.changeset-check.outputs.has_changeset == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = '<!-- changeset-check-bot -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+              });
+            }
