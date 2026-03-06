@@ -25,7 +25,7 @@ variable "aws_region" {
 variable "project_name" {
   description = "프로젝트 이름(prefix)"
   type        = string
-  default     = "devsecops-poc"
+  default     = "previo"
 
   validation {
     condition     = can(regex("^[a-z0-9-]{3,30}$", var.project_name))
@@ -124,7 +124,7 @@ variable "enable_nat_gateway" {
 variable "db_name" {
   description = "RDS 초기 DB 이름"
   type        = string
-  default     = "devsecops"
+  default     = "previo"
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9_]{0,62}$", var.db_name))

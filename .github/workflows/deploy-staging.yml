@@ -40,19 +40,19 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: API 테스트
-        run: pnpm --filter @devsecops/api test
+        run: pnpm --filter @previo/api test
 
       - name: API 타입 체크
-        run: pnpm --filter @devsecops/api typecheck
+        run: pnpm --filter @previo/api typecheck
 
       - name: API 빌드
-        run: pnpm --filter @devsecops/api build
+        run: pnpm --filter @previo/api build
 
       - name: Web 타입 체크
-        run: pnpm --filter @devsecops/web typecheck
+        run: pnpm --filter @previo/web typecheck
 
       - name: Web 빌드
-        run: pnpm --filter @devsecops/web build
+        run: pnpm --filter @previo/web build
 
   preflight:
     name: Preflight checks (staging)

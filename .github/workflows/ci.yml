@@ -38,10 +38,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: API 타입 체크
-        run: pnpm --filter @devsecops/api typecheck
+        run: pnpm --filter @previo/api typecheck
 
       - name: Web 타입 체크
-        run: pnpm --filter @devsecops/web typecheck
+        run: pnpm --filter @previo/web typecheck
 
   # ── 2단계: 테스트 ─────────────────────────────────────────
   test:
@@ -66,7 +66,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: API 단위 테스트 실행 (Vitest)
-        run: pnpm --filter @devsecops/api test
+        run: pnpm --filter @previo/api test
 
   # ── 3단계: 빌드 (lint-and-typecheck + test 완료 후 실행) ──
   build:
@@ -94,7 +94,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: API 빌드
-        run: pnpm --filter @devsecops/api build
+        run: pnpm --filter @previo/api build
 
       - name: Web 빌드
-        run: pnpm --filter @devsecops/web build
+        run: pnpm --filter @previo/web build

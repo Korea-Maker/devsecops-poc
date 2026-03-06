@@ -77,12 +77,12 @@ describe("tenant auth config", () => {
 
   it("JWT 설정값은 trim된 형태로 노출되어야 한다", () => {
     process.env.JWT_ISSUER = "  https://issuer.example.com  ";
-    process.env.JWT_AUDIENCE = "  devsecops-api  ";
+    process.env.JWT_AUDIENCE = "  previo-api  ";
     process.env.JWT_JWKS_URL = "  https://issuer.example.com/.well-known/jwks.json  ";
 
     expect(getJwtAuthConfig()).toEqual({
       issuer: "https://issuer.example.com",
-      audience: "devsecops-api",
+      audience: "previo-api",
       jwksUrl: "https://issuer.example.com/.well-known/jwks.json",
     });
   });
@@ -134,7 +134,7 @@ describe("tenant auth config", () => {
     process.env.TENANT_AUTH_MODE = "required";
     process.env.AUTH_MODE = "jwt";
     process.env.JWT_ISSUER = "https://issuer.example.com";
-    process.env.JWT_AUDIENCE = "devsecops-api";
+    process.env.JWT_AUDIENCE = "previo-api";
     process.env.JWT_JWKS_URL = "https://issuer.example.com/.well-known/jwks.json";
     process.env.JWT_ROLE_CLAIM = "roles[";
 

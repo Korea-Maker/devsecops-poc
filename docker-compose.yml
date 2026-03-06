@@ -1,14 +1,14 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: devsecops-postgres
+    container_name: previo-postgres
     restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: devsecops
-      POSTGRES_PASSWORD: devsecops
-      POSTGRES_DB: devsecops
+      POSTGRES_USER: previo
+      POSTGRES_PASSWORD: previo
+      POSTGRES_DB: previo
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

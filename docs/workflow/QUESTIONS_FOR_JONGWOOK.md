@@ -304,7 +304,7 @@
 - (B) OAuth 2.0 토큰 — 표준, 세부 권한 제어
 - (C) API Key (단순 사용) + OAuth (고급 사용)
 
-**빠른 추천**: **(A) API Key**. CI/CD에서 환경변수로 설정하기 가장 쉬움. `DEVSECOPS_API_KEY=xxx` 한 줄이면 연동 완료. OAuth는 사용자 수 증가 후 추가.
+**빠른 추천**: **(A) API Key**. CI/CD에서 환경변수로 설정하기 가장 쉬움. `PREVIO_API_KEY=xxx` 한 줄이면 연동 완료. OAuth는 사용자 수 증가 후 추가.
 
 > 답변:
 

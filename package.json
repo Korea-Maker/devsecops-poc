@@ -1,8 +1,8 @@
 {
-  "name": "devsecops-poc",
+  "name": "previo",
   "version": "0.0.1",
   "private": true,
-  "description": "스타트업 개발팀을 위한 DevSecOps 플랫폼 PoC",
+  "description": "스타트업 개발팀을 위한 DevSecOps 플랫폼",
   "scripts": {
     "dev": "pnpm -r --parallel dev",
     "build": "pnpm -r build",

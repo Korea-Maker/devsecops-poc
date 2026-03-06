@@ -736,7 +736,7 @@ describe("Scans API", () => {
     let originalFetch: typeof global.fetch;
 
     const jwtIssuer = "https://issuer.example.com";
-    const jwtAudience = "devsecops-api";
+    const jwtAudience = "previo-api";
     const jwtKid = "test-rs256-kid";
 
     type JwtIssueOptions = {

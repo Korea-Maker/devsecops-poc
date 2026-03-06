@@ -65,8 +65,8 @@
 | `PLATFORM_JWT_PRIVATE_KEY_PEM` | — | 플랫폼 access token 서명 개인키(PEM) |
 | `PLATFORM_JWT_PUBLIC_KEY_PEM` | — | 플랫폼 access token 공개키(PEM, JWKS 노출용) |
 | `PLATFORM_JWT_KID` | — | 플랫폼 JWKS key id |
-| `PLATFORM_JWT_ISSUER` | `https://devsecops.local` | 플랫폼 access token issuer |
-| `PLATFORM_JWT_AUDIENCE` | `devsecops-api` | 플랫폼 access token audience |
+| `PLATFORM_JWT_ISSUER` | `https://previo.local` | 플랫폼 access token issuer |
+| `PLATFORM_JWT_AUDIENCE` | `previo-api` | 플랫폼 access token audience |
 | `PLATFORM_JWT_ACCESS_TTL_SEC` | `3600` | 플랫폼 access token 만료(초) |
 
 ---
@@ -77,7 +77,7 @@
 |---|---|---|
 | `GITHUB_WEBHOOK_SECRET` | — | webhook 시그니처 검증 시크릿 (선택) |
 | `GITHUB_APP_ID` | — | GitHub App ID (미구현, 향후 예정) |
-| `DEVSECOPS_API_URL` | — | GitHub Actions에서 사용할 API 베이스 URL |
+| `PREVIO_API_URL` | — | GitHub Actions에서 사용할 API 베이스 URL |
 
 ---
 

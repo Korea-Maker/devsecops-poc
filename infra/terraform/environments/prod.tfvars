@@ -2,7 +2,7 @@
 
 environment  = "prod"
 aws_region   = "ap-northeast-2"
-project_name = "devsecops-poc"
+project_name = "previo"
 
 # Safety gate (default false)
 allow_resource_creation = false
@@ -21,7 +21,7 @@ private_subnet_cidrs = ["10.40.10.0/24", "10.40.11.0/24"]
 enable_nat_gateway   = true
 
 # RDS
-db_name                      = "devsecops"
+db_name                      = "previo"
 db_instance_class            = "db.t4g.small"
 db_allocated_storage         = 50
 db_max_allocated_storage     = 500
@@ -29,7 +29,7 @@ db_backup_retention_days     = 14
 db_multi_az                  = true
 db_deletion_protection       = true
 db_skip_final_snapshot       = false
-db_final_snapshot_identifier = "devsecops-poc-prod-final"
+db_final_snapshot_identifier = "previo-prod-final"
 db_master_username           = "app_admin"
 db_master_password           = null
 db_engine_version            = "15.5"

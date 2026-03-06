@@ -2,7 +2,7 @@
 
 ## 개요
 
-DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke + staging optional RLS canary)은 반영되었고, Terraform IaC는 safe-by-default skeleton(vpc/rds/ecs/s3 + tfvars + guard script + PR plan workflow)까지 적용된 상태다.
+Previo의 배포 전략 및 파이프라인 설계. GitHub Actions 기반 staging/production 배포 워크플로우의 최소 실행형(verify/preflight/deploy/smoke + staging optional RLS canary)은 반영되었고, Terraform IaC는 safe-by-default skeleton(vpc/rds/ecs/s3 + tfvars + guard script + PR plan workflow)까지 적용된 상태다.
 
 ---
 
@@ -33,8 +33,8 @@ DevSecOps PoC의 배포 전략 및 파이프라인 설계. GitHub Actions 기반
        ▼
 ┌──────────────────┐
 │ ECR Push         │ ← 이미지 레지스트리
-│ (amazon-ecr)     │   - devsecops-api:latest
-└──────┬───────────┘   - devsecops-web:latest
+│ (amazon-ecr)     │   - previo-api:latest
+└──────┬───────────┘   - previo-web:latest
        │
        ├─ Staging 배포 (자동)
        │  └─ ECS Task 업데이트
@@ -177,14 +177,14 @@ Production 중단 및 긴급 롤백 필요 시:
 ```bash
 # 1. ECS Service 업데이트 (이전 Task Definition)
 aws ecs update-service \
-  --cluster devsecops-prod \
-  --service devsecops-api \
-  --task-definition devsecops-api:42
+  --cluster previo-prod \
+  --service previo-api \
+  --task-definition previo-api:42
 
 # 2. 배포 상태 확인
 aws ecs describe-services \
-  --cluster devsecops-prod \
-  --services devsecops-api
+  --cluster previo-prod \
+  --services previo-api
 
 # 3. 롤백 완료 시간: ~5분
 ```
@@ -357,7 +357,7 @@ GitHub 실행(권장):
 
 **.env.development** (로컬, git ignored):
 ```
-DATABASE_URL=postgresql://admin:postgres@localhost:5432/devsecops
+DATABASE_URL=postgresql://admin:postgres@localhost:5432/previo
 LOG_LEVEL=debug
 JWT_SECRET=dev-secret-key
 GOOGLE_OAUTH_ID=xxx
@@ -368,7 +368,7 @@ GOOGLE_OAUTH_SECRET=xxx
 
 **AWS Secrets Manager** 또는 **.env.staging** (파일은 git ignored):
 ```
-DATABASE_URL=postgresql://...@staging-rds.amazonaws.com:5432/devsecops
+DATABASE_URL=postgresql://...@staging-rds.amazonaws.com:5432/previo
 LOG_LEVEL=info
 JWT_SECRET=staging-secret-key
 GOOGLE_OAUTH_ID=xxx

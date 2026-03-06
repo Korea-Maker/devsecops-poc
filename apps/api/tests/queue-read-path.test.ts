@@ -71,7 +71,7 @@ afterEach(async () => {
 describe("queue read path selection", () => {
   it("DATA_BACKEND=postgres면 queue status/dead-letter read는 tenant-scoped DB direct query를 우선 사용해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "shadow";
 
     const mock = createMockSqlClient((sql, values) => {

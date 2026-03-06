@@ -1,6 +1,6 @@
-# devsecops-poc
+# Previo
 
-스타트업(초기 1~5명 팀)을 위한 **DevSecOps 플랫폼 PoC**.
+스타트업(초기 1~5명 팀)을 위한 **DevSecOps 플랫폼**.
 
 보안 전담 인력이 없는 작은 개발팀이, 복잡한 설정 없이 **SAST + SCA + Secret 스캔**을 CI 흐름에 붙일 수 있도록 만드는 프로젝트다.
 
@@ -28,18 +28,18 @@ pnpm install
 cp .env.example .env
 docker compose up -d            # PostgreSQL (선택)
 
-pnpm --filter @devsecops/api dev   # API: localhost:3001
-pnpm --filter @devsecops/web dev   # Web: localhost:3000
+pnpm --filter @previo/api dev   # API: localhost:3001
+pnpm --filter @previo/web dev   # Web: localhost:3000
 ```
 
 ### 검증
 
 ```bash
-pnpm --filter @devsecops/api test
-pnpm --filter @devsecops/api typecheck
-pnpm --filter @devsecops/web typecheck
-pnpm --filter @devsecops/api build
-pnpm --filter @devsecops/web build
+pnpm --filter @previo/api test
+pnpm --filter @previo/api typecheck
+pnpm --filter @previo/web typecheck
+pnpm --filter @previo/api build
+pnpm --filter @previo/web build
 ```
 
 ---
@@ -103,10 +103,10 @@ Terraform AWS 인증 (선택): `AWS_ROLE_TO_ASSUME` (OIDC 권장) 또는 `AWS_AC
 ## 프로젝트 구조
 
 ```
-devsecops-poc/
+previo/
 ├── apps/
-│   ├── api/                  # Fastify API (@devsecops/api)
-│   └── web/                  # Next.js Web (@devsecops/web)
+│   ├── api/                  # Fastify API (@previo/api)
+│   └── web/                  # Next.js Web (@previo/web)
 ├── infra/
 │   ├── docker/               # Docker Compose 설정
 │   ├── terraform/            # AWS IaC (VPC/RDS/ECS/S3)

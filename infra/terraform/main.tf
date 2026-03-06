@@ -10,11 +10,11 @@ terraform {
 
   # TODO(ops-phase-next): 원격 상태(S3 + DynamoDB lock)로 전환
   # backend "s3" {
-  #   bucket         = "devsecops-terraform-state"
+  #   bucket         = "previo-terraform-state"
   #   key            = "staging/terraform.tfstate"
   #   region         = "ap-northeast-2"
   #   encrypt        = true
-  #   dynamodb_table = "devsecops-terraform-lock"
+  #   dynamodb_table = "previo-terraform-lock"
   # }
 }
 
@@ -37,7 +37,7 @@ locals {
       Project     = var.project_name
       Environment = var.environment
       ManagedBy   = "Terraform"
-      Stack       = "devsecops-poc"
+      Stack       = "previo"
     },
     var.tags
   )

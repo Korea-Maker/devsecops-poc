@@ -1,4 +1,4 @@
-# MASTER_PLAN.md — DevSecOps PoC 실행 계획
+# MASTER_PLAN.md — Previo 실행 계획
 
 > 스타트업 개발팀을 위한 DevSecOps 플랫폼. 솔로 개발자(종욱) + Claude Code 워크플로우.
 > 이 문서는 Phase 0부터 Phase 9까지의 실행 로드맵이다.

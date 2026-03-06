@@ -48,8 +48,8 @@ describe("auth routes", () => {
     process.env.OIDC_GOOGLE_CLIENT_ID = "google-client-id";
     process.env.OIDC_GOOGLE_CLIENT_SECRET = "google-client-secret";
     process.env.OIDC_GOOGLE_REDIRECT_URI = "http://localhost:3001/api/v1/auth/google/callback";
-    process.env.PLATFORM_JWT_ISSUER = "https://devsecops.example.com";
-    process.env.PLATFORM_JWT_AUDIENCE = "devsecops-api";
+    process.env.PLATFORM_JWT_ISSUER = "https://previo.example.com";
+    process.env.PLATFORM_JWT_AUDIENCE = "previo-api";
 
     clearOrganizationStore();
     vi.restoreAllMocks();
@@ -211,8 +211,8 @@ describe("auth routes", () => {
 
     const verified = await jwtVerify(callbackBody.accessToken as string, verificationKey, {
       algorithms: ["RS256"],
-      audience: "devsecops-api",
-      issuer: "https://devsecops.example.com",
+      audience: "previo-api",
+      issuer: "https://previo.example.com",
     });
 
     const payload = verified.payload as JWTPayload & {

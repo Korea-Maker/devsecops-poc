@@ -17,7 +17,7 @@ GitHub 워크플로우에서 DevSecOps 스캔을 자동으로 트리거하고, w
 - [x] GitHub 연동 상태 조회 (`GET /api/v1/github/status`)
 - [x] GitHub Actions CI 워크플로우 (lint/typecheck/test/build)
 - [x] GitHub Actions 보안 스캔 워크플로우 (매트릭스 병렬 실행)
-- [x] DevSecOps Composite Action (스캔 생성 + 폴링 + 결과 출력)
+- [x] Previo Composite Action (스캔 생성 + 폴링 + 결과 출력)
 - [x] 통합 테스트 (webhook 시그니처, push/PR 이벤트, 상태 엔드포인트)
 
 ---
@@ -53,10 +53,10 @@ GitHub 워크플로우에서 DevSecOps 스캔을 자동으로 트리거하고, w
 
 ### Webhook 설정
 
-#### 1. DevSecOps API 서버 실행
+#### 1. Previo API 서버 실행
 
 ```bash
-pnpm --filter @devsecops/api dev
+pnpm --filter @previo/api dev
 ```
 
 기본 포트: `http://localhost:3001`
@@ -124,7 +124,7 @@ curl -X POST http://localhost:3001/api/v1/github/webhook \
 
 GitHub Settings > Secrets and variables > Actions > New repository secret
 
-- `DEVSECOPS_API_URL`: DevSecOps API 베이스 URL (예: `https://api.example.com`)
+- `PREVIO_API_URL`: Previo API 베이스 URL (예: `https://api.example.com`)
 - `GITHUB_WEBHOOK_SECRET`: webhook 시크릿 (선택)
 - `GITHUB_APP_ID`: GitHub App ID (선택, 향후 구현용)
 
@@ -152,7 +152,7 @@ jobs:
     steps:
       - uses: ./.github/actions/devsecops-scan
         with:
-          api-url: ${{ secrets.DEVSECOPS_API_URL }}
+          api-url: ${{ secrets.PREVIO_API_URL }}
           engine: ${{ matrix.engine }}
 ```
 
@@ -160,10 +160,10 @@ jobs:
 
 #### 4. Composite Action 사용 예시
 
-자체 워크플로우에서 DevSecOps Composite Action을 사용할 수 있습니다:
+자체 워크플로우에서 Previo Composite Action을 사용할 수 있습니다:
 
 ```yaml
-- name: DevSecOps 보안 스캔
+- name: Previo 보안 스캔
   uses: ./.github/actions/devsecops-scan
   with:
     api-url: https://api.example.com
@@ -209,7 +209,7 @@ curl http://localhost:3001/api/v1/github/status
 |------|------|------|
 | `GITHUB_WEBHOOK_SECRET` | webhook 시그니처 검증 시크릿 (선택) | `sk-github-webhook-abc123` |
 | `GITHUB_APP_ID` | GitHub App ID (미구현, 향후 예정) | `123456` |
-| `DEVSECOPS_API_URL` | DevSecOps API 베이스 URL (GitHub Actions) | `https://api.example.com` |
+| `PREVIO_API_URL` | Previo API 베이스 URL (GitHub Actions) | `https://api.example.com` |
 
 ---
 
@@ -230,13 +230,13 @@ curl http://localhost:3001/api/v1/github/status
 
 ```bash
 # 통합 테스트 실행
-pnpm --filter @devsecops/api test
+pnpm --filter @previo/api test
 
 # 타입 체크
-pnpm --filter @devsecops/api typecheck
+pnpm --filter @previo/api typecheck
 
 # 빌드 검증
-pnpm --filter @devsecops/api build
+pnpm --filter @previo/api build
 ```
 
 ---

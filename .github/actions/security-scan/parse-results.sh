@@ -228,7 +228,7 @@ fi
 # Markdown PR Comment 생성
 # ---------------------------------------------------------------------------
 {
-  echo "<!-- devsecops-security-scan -->"
+  echo "<!-- previo-security-scan -->"
   echo "## 🔒 Security Scan Results"
   echo ""
 

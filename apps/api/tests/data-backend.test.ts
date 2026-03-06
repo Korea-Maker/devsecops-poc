@@ -196,7 +196,7 @@ describe("data backend config", () => {
 
   it("postgres 초기화 실패 시 memory로 fallback 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://invalid-host/devsecops";
+    process.env.DATABASE_URL = "postgresql://invalid-host/previo";
 
     const result = await initializeDataBackend({
       logger: silentLogger,
@@ -216,7 +216,7 @@ describe("data backend config", () => {
 
   it("schema migration은 순서대로 한 번만 적용되어야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const appliedVersions = new Set<string>();
     const mock = createMockSqlClient((sql, values) => {
@@ -268,7 +268,7 @@ describe("data backend config", () => {
 
   it("tenant RLS migration은 role/policy idempotency 훅 SQL을 포함해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const mock = createMockSqlClient();
 
@@ -298,7 +298,7 @@ describe("data backend config", () => {
 
   it("TENANT_RLS_MODE=enforce면 초기화 시 RLS enable/force가 적용되어야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "enforce";
 
     const mock = createMockSqlClient();
@@ -321,7 +321,7 @@ describe("data backend config", () => {
 
   it("TENANT_RLS_MODE=shadow에서는 tenant persistence 전에 session context를 주입해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "shadow";
 
     const mock = createMockSqlClient();
@@ -353,7 +353,7 @@ describe("data backend config", () => {
 
   it("startup 시 running 상태로 멈춘 scan을 queued로 복구하고 queue에 재적재해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const queueRows: Array<{ scan_id: string; position: number }> = [];
 
@@ -416,7 +416,7 @@ describe("data backend config", () => {
 
   it("postgres 초기화 시 queue/dead-letter/retry 상태를 hydrate 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const mock = createMockSqlClient((sql) => {
       if (sql.includes("FROM scan_queue_jobs")) {
@@ -479,7 +479,7 @@ describe("data backend config", () => {
 
   it("persistQueueState는 postgres 모드에서 단일 transaction으로 queue/dead-letter/retry 스냅샷을 저장해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const mock = createMockSqlClient();
 
@@ -561,7 +561,7 @@ describe("data backend config", () => {
 
   it("persistQueueState는 snapshot 저장 중 오류가 나면 transaction을 rollback 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const mock = createMockSqlClient((sql) => {
       if (sql.includes("INSERT INTO scan_dead_letters")) {
@@ -603,7 +603,7 @@ describe("data backend config", () => {
 
   it("TENANT_AUDIT_LOG_RETENTION_DAYS가 설정되면 초기화 시 오래된 감사 로그를 prune 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_AUDIT_LOG_RETENTION_DAYS = "7";
 
     const auditRows = [
@@ -664,7 +664,7 @@ describe("data backend config", () => {
 
   it("postgres 초기화 시 organization invite token 상태를 hydrate 해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const mock = createMockSqlClient((sql) => {
       if (sql.includes("FROM organizations")) {
@@ -720,7 +720,7 @@ describe("data backend config", () => {
 
   it("persistOrganizationInviteTokenRecord는 postgres 모드에서 초대 토큰 upsert를 저장해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
 
     const mock = createMockSqlClient();
 
@@ -764,7 +764,7 @@ describe("data backend config", () => {
 
   it("postgres read path는 tenant-scoped direct query + session context를 사용해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "shadow";
 
     const mock = createMockSqlClient((sql, values) => {
@@ -856,7 +856,7 @@ describe("data backend config", () => {
 
   it("runtime guard warn 모드에서는 unsafe tenant/service context 사용을 경고해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "shadow";
     process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "warn";
 
@@ -888,7 +888,7 @@ describe("data backend config", () => {
 
   it("runtime guard enforce 모드에서는 unsafe tenant/service context 사용을 차단해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "enforce";
     process.env.TENANT_RLS_RUNTIME_GUARD_MODE = "enforce";
 

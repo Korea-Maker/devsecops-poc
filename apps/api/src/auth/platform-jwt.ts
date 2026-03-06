@@ -22,8 +22,8 @@ interface PlatformJwtSignerState {
   privateKey: Awaited<ReturnType<typeof importPKCS8>>;
 }
 
-const DEFAULT_PLATFORM_JWT_ISSUER = "https://devsecops.local";
-const DEFAULT_PLATFORM_JWT_AUDIENCE = "devsecops-api";
+const DEFAULT_PLATFORM_JWT_ISSUER = "https://previo.local";
+const DEFAULT_PLATFORM_JWT_AUDIENCE = "previo-api";
 const DEFAULT_PLATFORM_JWT_EXPIRES_IN_SECONDS = 3600;
 
 let logger: LoggerLike = console;

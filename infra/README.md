@@ -2,7 +2,7 @@
 
 ## 개요
 
-DevSecOps PoC의 운영 환경 인프라 정의 및 배포 자동화.
+Previo의 운영 환경 인프라 정의 및 배포 자동화.
 
 - **클라우드 대상**: AWS (우선), GCP/Azure (차선)
 - **IaC 도구**: Terraform (safe-by-default skeleton 적용)
@@ -55,8 +55,8 @@ DevSecOps PoC의 운영 환경 인프라 정의 및 배포 자동화.
 ### 컴퓨트
 
 - **ECS Cluster**: Fargate 기반 컨테이너 실행
-  - Task definition (API): `devsecops-api:latest`
-  - Task definition (Web): `devsecops-web:latest`
+  - Task definition (API): `previo-api:latest`
+  - Task definition (Web): `previo-web:latest`
   - Auto Scaling Group (원하는 작업 수: 2-5)
 
 - **EC2 (선택)**: 자체 관리형 ECS 클러스터 (비용 최적화 시)
@@ -82,8 +82,8 @@ DevSecOps PoC의 운영 환경 인프라 정의 및 배포 자동화.
 ### 저장소
 
 - **S3 Buckets**:
-  - `devsecops-artifacts` (빌드 아티팩트)
-  - `devsecops-logs` (CloudWatch Logs)
+  - `previo-artifacts` (빌드 아티팩트)
+  - `previo-logs` (CloudWatch Logs)
 
 ### 시크릿 관리
 
@@ -273,17 +273,17 @@ cd infra/docker
 docker-compose -f docker-compose.staging.yml up -d
 
 # 3. 데이터베이스 마이그레이션
-pnpm --filter @devsecops/api migrate
+pnpm --filter @previo/api migrate
 
 # 4. 애플리케이션 시작
 pnpm install
-pnpm --filter @devsecops/api dev
-pnpm --filter @devsecops/web dev
+pnpm --filter @previo/api dev
+pnpm --filter @previo/web dev
 ```
 
 API: http://localhost:3001
 Web: http://localhost:3000
-Database: postgres://localhost:5432/devsecops
+Database: postgres://localhost:5432/previo
 
 ---
 

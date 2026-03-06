@@ -2,7 +2,7 @@
 
 environment  = "staging"
 aws_region   = "ap-northeast-2"
-project_name = "devsecops-poc"
+project_name = "previo"
 
 # Safety gate (default false)
 allow_resource_creation = false
@@ -21,7 +21,7 @@ private_subnet_cidrs = ["10.30.10.0/24", "10.30.11.0/24"]
 enable_nat_gateway   = true
 
 # RDS
-db_name                      = "devsecops"
+db_name                      = "previo"
 db_instance_class            = "db.t4g.micro"
 db_allocated_storage         = 20
 db_max_allocated_storage     = 200

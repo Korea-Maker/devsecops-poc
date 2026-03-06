@@ -121,7 +121,7 @@ function generateHtmlReport(scan: ScanRecord): string {
     ${findingsHtml}
     ${errorHtml}
 
-    <footer>DevSecOps PoC &mdash; 리포트 생성 시각: ${new Date().toISOString()}</footer>
+    <footer>Previo &mdash; 리포트 생성 시각: ${new Date().toISOString()}</footer>
   </div>
 </body>
 </html>`;

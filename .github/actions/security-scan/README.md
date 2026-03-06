@@ -23,7 +23,7 @@ PR이 열리거나 업데이트될 때 3개 보안 스캔 엔진을 실행하고
 ### 다른 레포에서 사용
 
 ```yaml
-- uses: your-org/devsecops-poc/.github/actions/security-scan@main
+- uses: your-org/previo/.github/actions/security-scan@main
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     fail-threshold: high  # critical 외에 high도 차단
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: your-org/devsecops-poc/.github/actions/security-scan@main
+      - uses: your-org/previo/.github/actions/security-scan@main
         id: scan
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

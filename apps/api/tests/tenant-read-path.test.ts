@@ -101,7 +101,7 @@ afterEach(async () => {
 describe("tenant read path selection", () => {
   it("DATA_BACKEND=postgres면 organization/membership read는 tenant-scoped DB direct query를 우선 사용해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "shadow";
 
     const mock = createMockSqlClient((sql, values) => {
@@ -239,7 +239,7 @@ describe("tenant read path selection", () => {
 
   it("DATA_BACKEND=postgres면 organizations list / audit-logs read는 tenant-scoped DB direct query를 우선 사용해야 한다", async () => {
     process.env.DATA_BACKEND = "postgres";
-    process.env.DATABASE_URL = "postgresql://example/devsecops";
+    process.env.DATABASE_URL = "postgresql://example/previo";
     process.env.TENANT_RLS_MODE = "shadow";
 
     const mock = createMockSqlClient((sql, values) => {

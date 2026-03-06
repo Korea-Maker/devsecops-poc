@@ -164,7 +164,7 @@ function DashboardContent() {
     <div className={styles.container}>
       {/* 헤더 */}
       <header className={styles.header}>
-        <h1 className={styles.title}>DevSecOps Dashboard</h1>
+        <h1 className={styles.title}>Previo Dashboard</h1>
         <p className={styles.subtitle}>보안 스캔 현황 및 취약점 모니터링</p>
       </header>
 
